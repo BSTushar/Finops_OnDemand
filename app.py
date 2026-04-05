@@ -1,100 +1,22 @@
 from __future__ import annotations
-import io
 import logging
-from datetime import datetime
 import pandas as pd
 import streamlit as st
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from data_loader import LoadResult, finalize_binding, load_file
+from excel_export import build_excel, savings_numeric
 from processor import apply_na_fill, process
-from pricing_engine import CACHE_METADATA, DEFAULT_REGION, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale
+from pricing_engine import DEFAULT_REGION, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger(__name__)
 st.set_page_config(page_title='FinOps Optimizer', page_icon='💰', layout='wide', initial_sidebar_state='collapsed')
 st.markdown('\n<style>\n:root {\n  --fin-bg: #f4f5f7;\n  --fin-card: #ffffff;\n  --fin-text: #1a1d23;\n  --fin-muted: #6b7280;\n  --fin-border: #e2e5eb;\n  --fin-green: #00955c;\n  --fin-amber: #d97706;\n  --fin-red: #dc2626;\n  --fin-header-fg: #f0f2f5;\n  --fin-header-bg: #1a1d23;\n}\n@media (prefers-color-scheme: dark) {\n  :root {\n    --fin-bg: #0e1117;\n    --fin-card: #1e2128;\n    --fin-text: #f3f4f6;\n    --fin-muted: #9ca3af;\n    --fin-border: #374151;\n    --fin-header-fg: #f9fafb;\n    --fin-header-bg: #111827;\n  }\n}\nhtml, body {\n  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;\n}\n.stApp {\n  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;\n}\n@media (prefers-color-scheme: dark) {\n  .metric { background: var(--fin-card); border-color: var(--fin-border); }\n  .metric-label { color: var(--fin-muted); }\n  .metric-value { color: var(--fin-text); }\n}\n.hdr {\n  background: var(--fin-header-bg);\n  color: var(--fin-header-fg);\n  padding: 1.2rem 1.5rem;\n  border-radius: 8px;\n  margin-bottom: 1rem;\n}\n.hdr h1 { margin: 0; font-size: 1.35rem; font-weight: 600; }\n.hdr p { margin: 0.35rem 0 0; font-size: 0.8rem; opacity: 0.85; }\n.sec { font-size: 0.7rem; font-weight: 600; color: var(--fin-muted);\n       letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.35rem; }\n.metric-row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }\n.metric {\n  flex: 1 1 120px;\n  background: var(--fin-card);\n  border: 1px solid var(--fin-border);\n  border-radius: 8px;\n  padding: 0.85rem 1rem;\n}\n.metric-label { font-size: 0.65rem; font-weight: 600; color: var(--fin-muted); }\n.metric-value { font-size: 1.35rem; font-weight: 600; color: var(--fin-text); margin-top: 0.15rem; }\n.box-ok, .box-warn, .box-err {\n  padding: 0.65rem 1rem;\n  border-radius: 0 6px 6px 0;\n  font-size: 0.82rem;\n  margin: 0.4rem 0;\n}\n.box-ok { background: rgba(34, 197, 94, 0.12); border-left: 3px solid #22c55e; color: var(--fin-text); }\n.box-warn { background: rgba(245, 158, 11, 0.12); border-left: 3px solid #f59e0b; color: var(--fin-text); }\n.box-err { background: rgba(239, 68, 68, 0.12); border-left: 3px solid #ef4444; color: var(--fin-text); }\n#MainMenu, footer { visibility: hidden; }\n.block-container { padding-top: 1rem; max-width: 1480px; }\n[data-testid="stDataFrame"] { max-height: 520px; overflow: auto !important; }\n</style>\n', unsafe_allow_html=True)
-
-def _savings_numeric(v) -> float | None:
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return None
-    if isinstance(v, str):
-        if v.strip() == 'No Savings':
-            return 0.0
-        try:
-            return float(v.replace('%', ''))
-        except ValueError:
-            return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-def build_excel(df: pd.DataFrame, region_label: str) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Recommendations')
-        wb = writer.book
-        ws = writer.sheets['Recommendations']
-        thin = Side(style='thin', color='888888')
-        bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
-        hdr_fill = PatternFill('solid', fgColor='1A1D23')
-        hdr_font = Font(bold=True, color='FFFFFF', size=10)
-        for cidx in range(1, ws.max_column + 1):
-            c = ws.cell(row=1, column=cidx)
-            c.font = hdr_font
-            c.fill = hdr_fill
-            c.border = bdr
-            c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        sav_cols = [c for c in df.columns if 'Savings %' in c]
-        price_cols = [c for c in df.columns if 'Cost ($)' in c]
-        green_fill = PatternFill('solid', fgColor='D1FAE5')
-        amber_fill = PatternFill('solid', fgColor='FEF3C7')
-        red_fill = PatternFill('solid', fgColor='FEE2E2')
-        col_list = list(df.columns)
-        for ridx in range(2, ws.max_row + 1):
-            for cidx in range(1, ws.max_column + 1):
-                cell = ws.cell(row=ridx, column=cidx)
-                cell.border = bdr
-                cell.alignment = Alignment(vertical='center')
-                cell.font = Font(size=10)
-            for name in sav_cols:
-                if name not in col_list:
-                    continue
-                ci = col_list.index(name) + 1
-                sc = ws.cell(row=ridx, column=ci)
-                val = sc.value
-                nv = _savings_numeric(val)
-                if nv is None:
-                    continue
-                if nv >= 20:
-                    sc.fill = green_fill
-                elif nv > 0:
-                    sc.fill = amber_fill
-                else:
-                    sc.fill = red_fill
-            for name in price_cols:
-                if name not in col_list:
-                    continue
-                ci = col_list.index(name) + 1
-                ws.cell(row=ridx, column=ci).number_format = '$#,##0.0000'
-        for col_cells in ws.columns:
-            w = max((len(str(c.value or '')) for c in col_cells), default=8)
-            ws.column_dimensions[col_cells[0].column_letter].width = min(w + 2, 48)
-        ws.freeze_panes = 'A2'
-        ws.auto_filter.ref = ws.dimensions
-        ws_m = wb.create_sheet('Metadata')
-        ws_m.append(['Field', 'Value'])
-        ws_m.append(['Generated at', datetime.now().strftime('%Y-%m-%d %H:%M')])
-        ws_m.append(['Pricing region', region_label])
-        ws_m.append(['Pricing vintage', CACHE_METADATA['last_updated'].strftime('%Y-%m-%d')])
-        ws_m.append(['Rows', len(df)])
-    return buf.getvalue()
 
 def _savings_for_kpi(v) -> float | None:
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return None
     if isinstance(v, str) and v.strip() == 'No Savings':
         return None
-    return _savings_numeric(v)
+    return savings_numeric(v)
 
 def kpis(df: pd.DataFrame) -> dict:
     s1 = pd.Series([_savings_for_kpi(x) for x in df.get('Alt1 Savings %', [])], dtype=float)
@@ -118,11 +40,11 @@ for (key, default) in (('load_result', None), ('result', None), ('region_id', DE
         st.session_state[key] = default
 stale = cache_is_stale()
 pill = f'Cache {cache_age_days()}d — refresh due' if stale else 'Cache fresh'
-st.markdown(f'\n<div class="hdr">\n  <h1>💰 FinOps Optimizer <span style="opacity:0.85;font-size:0.75rem">({pill})</span></h1>\n  <p>EC2 & RDS · Actual-cost savings · Local pricing only · Original columns preserved</p>\n</div>\n', unsafe_allow_html=True)
+st.markdown(f'\n<div class="hdr">\n  <h1>💰 FinOps Optimizer <span style="opacity:0.85;font-size:0.75rem">({pill})</span></h1>\n  <p>EC2 & RDS · Actual-cost savings · Local pricing only · Original columns preserved</p>\n  <p style="margin-top:0.5rem;font-size:0.75rem;opacity:0.9">Map the column that holds the AWS <strong>API Name</strong> (e.g. <code>m5.large</code>, <code>db.r5.xlarge</code>). List prices are looked up locally; if an API name is not in the cache for the selected region, cost and savings show as N/A — not guessed.</p>\n</div>\n', unsafe_allow_html=True)
 (up_col, reg_col, svc_col, cpu_col, go_col) = st.columns([3, 2, 1, 1, 1])
 with up_col:
     uploaded = st.file_uploader('file', type=['csv', 'xlsx', 'xls'], label_visibility='collapsed')
-    st.caption('Upload CSV / Excel — all columns kept in order')
+    st.caption('Upload CSV / Excel — all columns kept in order. Use the column with AWS API Name for instance/DB class.')
 with reg_col:
     st.markdown('<div class="sec">Pricing region</div>', unsafe_allow_html=True)
     region_opts = [f'{label}  [{rid}]' for (rid, label) in SUPPORTED_REGIONS]
@@ -174,7 +96,7 @@ if lr is not None and (not binding_ready):
             di = 0
             if lr.instance_candidates:
                 di = cols_all.index(lr.instance_candidates[0]) if lr.instance_candidates[0] in cols_all else 0
-            inst_sel = st.selectbox('Instance / DB class column', cols_all, index=min(di, len(cols_all) - 1))
+            inst_sel = st.selectbox('Instance / DB class (AWS API Name)', cols_all, index=min(di, len(cols_all) - 1))
         with mc2:
             do = 0
             if lr.os_candidates:
@@ -249,17 +171,17 @@ if df_out is not None:
         view = view[view[inst_col].astype(str).str.lower().str.strip().str.startswith('db.')]
     os_col_name = bind.os if bind else None
     if vf_os and os_col_name and (os_col_name in view.columns):
-        view = view[view[os_col_name].astype(str).str.contains(vf_os, case=False, na=False)]
+        view = view[view[os_col_name].astype(str).str.contains(vf_os, case=False, na=False, regex=False)]
     if q:
         m = pd.Series(False, index=view.index)
         for col in view.columns:
-            m |= view[col].astype(str).str.contains(q, case=False, na=False)
+            m |= view[col].astype(str).str.contains(q, case=False, na=False, regex=False)
         view = view[m]
     st.caption(f'Showing **{len(view):,}** of **{len(df_out):,}** rows')
     render_kpis(kpis(view))
 
     def _style_sav(v: str) -> str:
-        n = _savings_numeric(v)
+        n = savings_numeric(v)
         if n is None:
             return 'color: #9ca3af'
         if n >= 20:
@@ -290,7 +212,8 @@ if df_out is not None:
         for (col_name, fn) in style_cols.items():
             sty = sty.map(fn, subset=[col_name])
         sty = sty.set_properties(**{'font-size': '0.8rem'})
-    except Exception:
+    except Exception as ex:
+        log.debug('dataframe style skipped: %s', type(ex).__name__)
         sty = view
     st.dataframe(sty, use_container_width=True, hide_index=True, height=480)
     export_df = apply_na_fill(df_out)

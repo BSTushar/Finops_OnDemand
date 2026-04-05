@@ -1,0 +1,68 @@
+from __future__ import annotations
+import unittest
+import pandas as pd
+from instance_api import canonicalize_instance_api_name
+from pricing_engine import get_price, get_rds_hourly
+from data_loader import ColumnBinding
+from processor import INSERT_COLS, apply_na_fill, process
+
+
+class TestCanonicalizeApiName(unittest.TestCase):
+
+    def test_valid_ec2(self):
+        self.assertEqual(canonicalize_instance_api_name('m5.large'), 'm5.large')
+        self.assertEqual(canonicalize_instance_api_name('C6I.XLARGE'), 'c6i.xlarge')
+
+    def test_valid_rds(self):
+        self.assertEqual(canonicalize_instance_api_name('db.r5.large'), 'db.r5.large')
+
+    def test_invalid_rejected(self):
+        self.assertIsNone(canonicalize_instance_api_name('m5_large'))
+        self.assertIsNone(canonicalize_instance_api_name('unknown.type'))
+        self.assertIsNone(canonicalize_instance_api_name(''))
+        self.assertIsNone(canonicalize_instance_api_name('m5'))
+        self.assertIsNone(canonicalize_instance_api_name('db.r5'))
+        self.assertIsNone(canonicalize_instance_api_name('db.r5.large.extra'))
+
+
+class TestStrictPricing(unittest.TestCase):
+
+    def test_exact_region_no_fallback(self):
+        self.assertIsNotNone(get_price('m5.large', region='eu-west-1', os='linux'))
+        self.assertIsNone(get_price('m5.large', region='eu-west-99', os='linux'))
+
+    def test_exact_key_no_interpolation(self):
+        self.assertIsNone(get_price('m5.fakeclass', region='eu-west-1', os='linux'))
+
+    def test_unknown_os_no_default_surcharge(self):
+        self.assertIsNone(get_price('m5.large', region='eu-west-1', os='freebsd'))
+
+    def test_rds_missing_skus_na(self):
+        self.assertIsNone(get_rds_hourly('db.c5.2xlarge', region='eu-west-1', os='linux'))
+
+    def test_rds_known_skus(self):
+        self.assertIsNotNone(get_rds_hourly('db.m5.large', region='eu-west-1', os='linux'))
+
+
+class TestProcessorStrict(unittest.TestCase):
+
+    def test_missing_rds_price_recommendations_without_cost(self):
+        df = pd.DataFrame({'API Name': ['db.c5.2xlarge'], 'OS': ['linux'], 'Spend': [100.0]})
+        b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
+        self.assertIn('Alt1 Instance', out.columns)
+        alt1 = out['Alt1 Instance'].iloc[0]
+        self.assertIsNotNone(alt1)
+        self.assertNotEqual(alt1, 'N/A')
+        self.assertEqual(out['Alt1 Cost ($)'].iloc[0], 'N/A')
+        self.assertEqual(out['Alt1 Savings %'].iloc[0], 'N/A')
+
+    def test_invalid_row_no_crash(self):
+        df = pd.DataFrame({'API Name': ['not-valid'], 'OS': ['linux'], 'Spend': [50.0]})
+        b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
+        self.assertEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+
+
+if __name__ == '__main__':
+    unittest.main()

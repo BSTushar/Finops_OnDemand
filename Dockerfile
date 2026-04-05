@@ -14,6 +14,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py                  .
+COPY excel_export.py         .
+COPY instance_api.py         .
 COPY data_loader.py          .
 COPY processor.py            .
 COPY recommender.py          .

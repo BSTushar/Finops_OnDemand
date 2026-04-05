@@ -1,8 +1,10 @@
 from __future__ import annotations
 import logging
+import math
 from typing import Literal
 import pandas as pd
 from data_loader import ColumnBinding
+from instance_api import canonicalize_instance_api_name
 from pricing_engine import DEFAULT_REGION, get_price, get_rds_hourly
 from recommender import CPUFilterMode, get_recommendations
 from rds_recommender import get_rds_recommendations
@@ -39,12 +41,18 @@ def _hourly_alt(alt: str | None, region: str, os_val: str, backend: Literal['ec2
     return _hourly_cur(alt, region, os_val, backend)
 
 def _project_alt_cost(actual: float | None, p_cur: float | None, p_alt: float | None) -> float | None:
-    if actual is None or actual <= 0 or p_cur is None or (p_alt is None) or (p_cur <= 0):
+    if actual is None or p_cur is None or p_alt is None:
+        return None
+    if not math.isfinite(actual) or not math.isfinite(p_cur) or not math.isfinite(p_alt):
+        return None
+    if actual <= 0 or p_cur <= 0 or p_alt < 0:
         return None
     return round(actual * (p_alt / p_cur), 4)
 
 def _savings_display(actual: float | None, alt_cost: float | None) -> float | str | None:
-    if actual is None or actual <= 0 or alt_cost is None:
+    if actual is None or alt_cost is None:
+        return None
+    if not math.isfinite(actual) or not math.isfinite(alt_cost) or actual <= 0:
         return None
     if alt_cost >= actual:
         return NO_SAVINGS
@@ -58,7 +66,7 @@ def _to_float(v) -> float | None:
         return None
     try:
         x = float(v)
-        if pd.isna(x):
+        if pd.isna(x) or not math.isfinite(x):
             return None
         return x
     except (TypeError, ValueError):
@@ -94,10 +102,14 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     act_out: list = [None] * n
     cpu: CPUFilterMode = cpu_filter if cpu_filter in ('default', 'intel', 'graviton', 'both') else 'both'
     for i in range(n):
-        inst = inst_series.iloc[i]
+        raw_inst = inst_series.iloc[i]
         os_val = os_series.iloc[i] or 'linux'
         act = actual_vals[i]
         act_out[i] = act
+        canon = canonicalize_instance_api_name(raw_inst)
+        if canon is None:
+            continue
+        inst = canon
         if not _row_matches_service(inst, service):
             continue
         backend = _row_price_service(inst, service)

@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import BinaryIO
 import pandas as pd
-from recommender import VALID_SIZES
+from instance_api import canonicalize_instance_api_name
 _VALUE_SAMPLE_CAP = 2000
 _MIN_AUTO_CONF = 0.48
 _TIE_BAND = 0.09
@@ -14,7 +14,7 @@ def _norm_header(name: str) -> str:
     s = re.sub('[_\\-]+', ' ', s)
     s = re.sub('\\s+', ' ', s)
     return s
-INSTANCE_HINTS: frozenset[str] = frozenset({'instance type', 'instancetype', 'instance', 'instance type id', 'ec2 type', 'ec2type', 'ec2 type id', 'instance size', 'resource type', 'vm type', 'vm size', 'vmsize', 'ec2 instance type', 'instance class', 'db instance class', 'database class', 'compute class', 'computeclass', 'instance type name'})
+INSTANCE_HINTS: frozenset[str] = frozenset({'instance type', 'instancetype', 'instance', 'instance type id', 'ec2 type', 'ec2type', 'ec2 type id', 'instance size', 'resource type', 'vm type', 'vm size', 'vmsize', 'ec2 instance type', 'instance class', 'db instance class', 'database class', 'compute class', 'computeclass', 'instance type name', 'api name', 'ec2 api name', 'instance api name'})
 OS_HINTS: frozenset[str] = frozenset({'os', 'o/s', 'operating system', 'operating system type', 'platform', 'os type', 'system', 'engine', 'database engine', 'environment os', 'environmentos', 'host os', 'guest os'})
 COST_HINTS: frozenset[str] = frozenset({'cost', 'monthly cost', 'total cost', 'charge', 'charges', 'cost ($)', 'cost(usd)', 'cost (usd)', 'cost_usd', 'billed cost', 'blended cost', 'unblended cost', 'amortized cost', 'spend', 'amount', 'total amount', 'billed amount', 'usage cost', 'line item cost', 'cost usd', 'usd cost', 'monthly spend'})
 
@@ -26,7 +26,6 @@ def _header_matches(h: str, hints: frozenset[str]) -> bool:
         if len(hint) >= 4 and hint in n:
             return True
     return False
-_FAMILY_RE = re.compile('^[a-z][a-z0-9]*$')
 _OS_MARKERS: tuple[str, ...] = ('linux', 'windows', 'rhel', 'ubuntu', 'debian', 'suse', 'sles', 'centos', 'red hat', 'microsoft', 'win ', 'win-', 'win20', 'win1', 'amazon linux', 'amzn')
 
 def _cell_looks_like_instance_type(cell: object) -> bool:
@@ -37,25 +36,7 @@ def _cell_looks_like_instance_type(cell: object) -> bool:
             return False
     except (TypeError, ValueError):
         pass
-    s = str(cell).strip().lower()
-    if not s or s in ('nan', 'none', 'n/a'):
-        return False
-    if s.startswith('db.'):
-        rest = s[3:]
-        parts = rest.split('.', 1)
-        if len(parts) != 2:
-            return False
-        (fam, size) = (parts[0], parts[1])
-    else:
-        parts = s.split('.', 1)
-        if len(parts) != 2:
-            return False
-        (fam, size) = (parts[0], parts[1])
-    if size not in VALID_SIZES:
-        return False
-    if len(fam) < 2 or len(fam) > 28:
-        return False
-    return bool(_FAMILY_RE.fullmatch(fam))
+    return canonicalize_instance_api_name(cell) is not None
 
 def _cell_looks_like_os(cell: object) -> bool:
     if cell is None:
@@ -189,7 +170,7 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
     inst_c_list = list(dict.fromkeys(inst_ui if needs_i else [inst_col]))
     os_c_list = list(dict.fromkeys(os_ui if needs_o else [os_col]))
     if needs_i:
-        warnings.append('Instance column ambiguous or low-confidence — pick the column with EC2/RDS instance types (e.g. m5.large, db.r5.xlarge).')
+        warnings.append('Instance column ambiguous or low-confidence — pick the column with AWS API Name values (e.g. m5.large, db.r5.xlarge).')
     if needs_o:
         warnings.append('OS column ambiguous or low-confidence — pick the column with Linux/Windows (or similar) values.')
     if len(cost_c) == 0:

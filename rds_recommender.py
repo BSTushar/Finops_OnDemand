@@ -1,22 +1,18 @@
 from __future__ import annotations
 import logging
+from instance_api import canonicalize_instance_api_name
 from recommender import CPUFilterMode, get_recommendations as get_ec2_recommendations
 logger = logging.getLogger(__name__)
 
-def parse_rds_class(db_class: str) -> str | None:
-    if not db_class or not isinstance(db_class, str):
-        return None
-    s = db_class.strip().lower()
-    if not s.startswith('db.'):
-        return None
-    body = s[3:].strip()
-    return body if body else None
 
 def get_rds_recommendations(db_class: str, cpu_filter: CPUFilterMode='both') -> dict[str, str | None]:
-    body = parse_rds_class(db_class)
     out: dict[str, str | None] = {'family': None, 'size': None, 'alt1': None, 'alt2': None}
-    if not body:
+    canon = canonicalize_instance_api_name(db_class)
+    if not canon or not canon.startswith('db.'):
+        if db_class and str(db_class).strip():
+            logger.warning('Invalid RDS API Name (value omitted for security)')
         return out
+    body = canon[3:]
     rec = get_ec2_recommendations(body, cpu_filter=cpu_filter)
 
     def to_db(x: str | None) -> str | None:
