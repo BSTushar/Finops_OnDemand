@@ -12,7 +12,6 @@ from processor import INSERT_COLS, apply_na_fill, process
 from rds_mysql_sa_prices import RDS_MYSQL_SA_HOURLY
 from rds_recommender import get_rds_recommendations
 
-# Ireland (eu-west-1) — locked to shipped local caches (no live AWS calls).
 IRELAND_EC2_LINUX_PER_HR: dict[str, float] = {
     'm5.large': 0.107,
     'm6i.large': 0.107,
@@ -181,7 +180,7 @@ class TestExcelExportShape(unittest.TestCase):
         ws = wb.active
         a1 = ws['A1'].value
         self.assertIsNotNone(a1)
-        self.assertIn('static AWS list-price snapshot', str(a1))
+        self.assertIn('eu-west-1', str(a1))
         self.assertEqual(str(a1).strip(), COST_DISCLAIMER_TEXT)
         snap = ws['A2'].value
         self.assertIn('Pricing Snapshot:', str(snap))
@@ -230,6 +229,26 @@ class TestPreshipServiceSmoke(unittest.TestCase):
         ws = wb.active
         hdr = [ws.cell(row=5, column=j).value for j in range(1, len(out.columns) + 1)]
         self.assertEqual(hdr, list(out.columns))
+
+
+class TestStressMixedDataset(unittest.TestCase):
+    """Messy real-world headers + mixed EC2/RDS + invalid rows — no crash."""
+
+    def test_synonym_headers_mixed_ec2_rds_invalid(self):
+        df = pd.DataFrame(
+            {
+                'compute_class': ['m5.large', 'db.r5.large', 'not.real', 'C7G.XLARGE'],
+                'platform': ['amazon linux', 'linux', 'linux', 'Linux'],
+                'billing_amount': [100.0, 200.0, 50.0, 80.0],
+            }
+        )
+        lr = analyze_load(df, [])
+        self.assertIsNotNone(lr.binding)
+        out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1', service='both', cpu_filter='both'))
+        self.assertEqual(len(out), 4)
+        self.assertEqual(out['Alt1 Instance'].iloc[2], 'N/A')
+        self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+        self.assertNotEqual(out['Alt1 Instance'].iloc[1], 'N/A')
 
 
 class TestPerformance10k(unittest.TestCase):

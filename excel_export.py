@@ -4,7 +4,7 @@ from datetime import datetime
 import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from pricing_engine import CACHE_METADATA, COST_DISCLAIMER_TEXT, DECISION_SUPPORT_NOTE, PRICING_SOURCE_LABEL, format_pricing_snapshot_line
+from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, PRICING_SOURCE_LABEL, cost_disclaimer_text, format_pricing_snapshot_line
 
 
 def savings_numeric(v) -> float | None:
@@ -30,6 +30,7 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
     ncol = max(len(df.columns), 1)
     end_letter = get_column_letter(ncol)
     snapshot = format_pricing_snapshot_line(pricing_region_id)
+    disclaimer = cost_disclaimer_text(pricing_region_id)
     with pd.ExcelWriter(buf, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Recommendations', startrow=startrow)
         wb = writer.book
@@ -40,7 +41,7 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
         note_font = Font(size=9)
         disc_fill = PatternFill('solid', fgColor='FEF3C7')
         for (r, txt, font, fill) in (
-            (1, COST_DISCLAIMER_TEXT, disc_font, disc_fill),
+            (1, disclaimer, disc_font, disc_fill),
             (2, snapshot, note_font, None),
             (3, DECISION_SUPPORT_NOTE, note_font, None),
         ):
@@ -102,7 +103,7 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
         ws.auto_filter.ref = f'A{hdr_row}:{end_letter}{ws.max_row}'
         ws_m = wb.create_sheet('Metadata')
         ws_m.append(['Field', 'Value'])
-        ws_m.append(['Disclaimer', COST_DISCLAIMER_TEXT])
+        ws_m.append(['Disclaimer', disclaimer])
         ws_m.append(['Pricing snapshot', snapshot])
         ws_m.append(['Decision support note', DECISION_SUPPORT_NOTE])
         ws_m.append(['Generated at', datetime.now().strftime('%Y-%m-%d %H:%M')])

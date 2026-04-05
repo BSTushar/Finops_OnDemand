@@ -4,9 +4,20 @@ from rds_mysql_sa_prices import RDS_MYSQL_SA_HOURLY
 logger = logging.getLogger(__name__)
 CACHE_TTL_DAYS = 7
 CACHE_METADATA: dict = {'last_updated': datetime(2025, 3, 18), 'source': 'AWS EC2 On-Demand Pricing — verified March 2025', 'version': '1.2'}
-COST_DISCLAIMER_TEXT: str = 'Costs are based on a static AWS list-price snapshot (eu-west-1). Values are indicative and must be validated against actual billing before decision-making.'
 PRICING_SOURCE_LABEL: str = 'Local AWS dataset'
 DECISION_SUPPORT_NOTE: str = 'This tool is for decision support only. It is not a replacement for billing systems. Recommendations and indicative costs must be validated against actual invoices and engineering constraints before changes to production.'
+DEFAULT_REGION = 'eu-west-1'
+SUPPORTED_REGIONS: list[tuple[str, str]] = [('eu-west-1', 'EU (Ireland)'), ('us-east-1', 'US East (N. Virginia)'), ('ap-south-1', 'Asia Pacific (Mumbai)'), ('eu-central-1', 'EU (Frankfurt)')]
+REGION_LABELS: dict[str, str] = dict(SUPPORTED_REGIONS)
+
+
+def cost_disclaimer_text(pricing_region_id: str) -> str:
+    rid = (pricing_region_id or DEFAULT_REGION).strip().lower()
+    friendly = REGION_LABELS.get(rid, rid)
+    return f'Indicative costs and savings use static on-demand list prices for the same region as the snapshot above: {friendly} ({rid}). Values are not invoices — validate against actual billing before decisions.'
+
+
+COST_DISCLAIMER_TEXT: str = cost_disclaimer_text(DEFAULT_REGION)
 
 
 def format_pricing_snapshot_line(pricing_region_id: str) -> str:
@@ -14,14 +25,15 @@ def format_pricing_snapshot_line(pricing_region_id: str) -> str:
     as_of = CACHE_METADATA['last_updated'].strftime('%Y-%m-%d')
     return f'Pricing Snapshot: {rid} | Source: {PRICING_SOURCE_LABEL} | As of: {as_of}'
 
+
 def cache_is_stale() -> bool:
     return datetime.now() - CACHE_METADATA['last_updated'] > timedelta(days=CACHE_TTL_DAYS)
 
+
 def cache_age_days() -> int:
     return (datetime.now() - CACHE_METADATA['last_updated']).days
-DEFAULT_REGION = 'eu-west-1'
-SUPPORTED_REGIONS: list[tuple[str, str]] = [('eu-west-1', 'EU (Ireland)'), ('us-east-1', 'US East (N. Virginia)'), ('ap-south-1', 'Asia Pacific (Mumbai)'), ('eu-central-1', 'EU (Frankfurt)')]
-REGION_LABELS: dict[str, str] = dict(SUPPORTED_REGIONS)
+
+
 WINDOWS_ADJ: float = 0.058
 OS_SURCHARGE_MAP: dict[str, float] = {'linux': 0.0, 'rhel': 0.06, 'suse': 0.04, 'windows': WINDOWS_ADJ}
 OS_ALIASES: dict[str, str] = {'amazon linux': 'linux', 'amazon linux 2': 'linux', 'al2': 'linux', 'al2023': 'linux', 'ubuntu': 'linux', 'debian': 'linux', 'linux': 'linux', 'lin': 'linux', 'red hat': 'rhel', 'redhat': 'rhel', 'red hat enterprise linux': 'rhel', 'win': 'windows', 'windows': 'windows', 'windows server': 'windows', 'win2016': 'windows', 'win2019': 'windows', 'win2022': 'windows', 'sles': 'suse', 'suse linux': 'suse'}

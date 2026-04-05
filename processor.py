@@ -13,6 +13,7 @@ ServiceMode = Literal['ec2', 'rds', 'both']
 INSERT_COLS: list[str] = ['Actual Cost ($)', 'Alt1 Instance', 'Alt1 Cost ($)', 'Alt1 Savings %', 'Alt2 Instance', 'Alt2 Cost ($)', 'Alt2 Savings %']
 NA = 'N/A'
 NO_SAVINGS = 'No Savings'
+ALT2_NO_DISTINCT = 'N/A (No distinct alternative)'
 
 def _row_matches_service(inst: str, service: ServiceMode) -> bool:
     s = str(inst).strip().lower()
@@ -122,7 +123,12 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
         p_a1 = _hourly_alt(alt1, region, os_val, backend)
         p_a2 = _hourly_alt(alt2, region, os_val, backend)
         a1i[i] = alt1
-        a2i[i] = alt2
+        if alt2 is not None:
+            a2i[i] = alt2
+        elif alt1 is not None:
+            a2i[i] = ALT2_NO_DISTINCT
+        else:
+            a2i[i] = None
         c1 = _project_alt_cost(act, p_cur, p_a1)
         c2 = _project_alt_cost(act, p_cur, p_a2)
         a1c[i] = c1

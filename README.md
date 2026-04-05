@@ -1,7 +1,7 @@
-# FinOps EC2 Optimizer · v1.4
+# FinOps EC2 Optimizer · v2.0
 **Production-grade AWS EC2 cost optimisation tool for enterprise datasets.**
 
-Release v1.4: workspace aligned with [Finops_OnDemand](https://github.com/BSTushar/Finops_OnDemand) main (April 2026).
+Release v2.0 — version 2 ready to play (April 2026).
 
 ---
 
@@ -101,6 +101,7 @@ New columns are inserted **immediately after** your mapped **instance** column (
 | `Alt1 Instance` / `Alt2 Instance` | Suggested API names |
 | `Alt1 Cost ($)` / `Alt2 Cost ($)` | Indicative, from list-price ratio × actual |
 | `Alt1 Savings %` / `Alt2 Savings %` | vs actual, or “No Savings” / `N/A` |
+| `Alt2 Instance` (edge case) | If only one distinct upgrade exists, shows **`N/A (No distinct alternative)`** instead of an empty cell |
 
 All **original** columns remain, in order, before/after that block.
 
