@@ -54,8 +54,8 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
             c.alignment = Alignment(wrap_text=True, vertical='center')
             c.border = bdr
         hdr_row = startrow + 1
-        hdr_fill = PatternFill('solid', fgColor='1A1D23')
-        hdr_font = Font(bold=True, color='FFFFFF', size=10)
+        hdr_fill = PatternFill('solid', fgColor='E5E7EB')
+        hdr_font = Font(bold=True, color='111827', size=10)
         for cidx in range(1, ncol + 1):
             c = ws.cell(row=hdr_row, column=cidx)
             c.font = hdr_font
