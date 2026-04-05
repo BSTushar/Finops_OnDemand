@@ -1,188 +1,230 @@
 """
-processor.py  ·  FinOps EC2 Optimizer  ·  v1.3
-===============================================
-Enrichment pipeline — strict column order, old-gen flagging, vectorised.
+processor.py  ·  FinOps Optimizer
+=================================
+Inserts enrichment ONLY immediately after the bound Instance column.
+Original columns: names, order, values unchanged.
 
-Output column layout (guaranteed):
-  Col 0  Instance Type
-  Col 1  OS
-  Col 2  On-Demand Price ($)
-  Col 3  Alt 1 Instance
-  Col 4  Alt 1 Price ($)
-  Col 5  Alt 2 Instance
-  Col 6  Alt 2 Price ($)
-  Col 7  Size
-  Col 8  Savings Opportunity (%)
-  Col 9  Generation Flag         ← NEW: "Old Gen" / "Current" / "Latest"
-  Col 10+ <all original columns, order preserved>
-
-Pricing: O(1) dict lookup — zero network calls, no guessing.
+Savings vs Actual: projected alt spend = Actual × (P_alt / P_cur); never uses
+on-demand as the savings baseline. Alt ≥ Actual → 0% / "No Savings".
 """
 
+from __future__ import annotations
+
 import logging
+from typing import Literal
+
 import pandas as pd
 
-from pricing_engine import get_price, DEFAULT_REGION
-from recommender import get_recommendations, parse_instance
+from data_loader import ColumnBinding
+from pricing_engine import DEFAULT_REGION, get_price, get_rds_hourly
+from recommender import CPUFilterMode, get_recommendations
+from rds_recommender import get_rds_recommendations
 
 logger = logging.getLogger(__name__)
 
-# ── Column specs ───────────────────────────────────────────────────────────
-ENRICHED_COLS: list[str] = [
-    "On-Demand Price ($)",
-    "Alt 1 Instance",
-    "Alt 1 Price ($)",
-    "Alt 2 Instance",
-    "Alt 2 Price ($)",
-    "Size",
-    "Savings Opportunity (%)",
-    "Generation Flag",
+ServiceMode = Literal["ec2", "rds", "both"]
+
+INSERT_COLS: list[str] = [
+    "Actual Cost ($)",
+    "Alt1 Instance",
+    "Alt1 Cost ($)",
+    "Alt1 Savings %",
+    "Alt2 Instance",
+    "Alt2 Cost ($)",
+    "Alt2 Savings %",
 ]
 
-NA_FILL = "N/A"
-
-# Old-generation families (for visual flagging)
-OLD_GEN_FAMILIES: frozenset[str] = frozenset({
-    "t1", "t2", "m1", "m2", "m3", "m4",
-    "c1", "c3", "c4",
-    "r3", "r4",
-    "i2", "i3",
-    "p2", "p3",
-    "g3", "g4dn", "g4ad",
-    "x1", "x1e",
-    "d2", "h1",
-})
-
-CURRENT_GEN_FAMILIES: frozenset[str] = frozenset({
-    "t3", "t3a", "m5", "m5a", "m6i", "m6g", "m6a",
-    "c5", "c5a", "c6i", "c6g", "c6a",
-    "r5", "r5a", "r5b", "r6i", "r6g", "r6a",
-    "i3en", "i4i",
-    "g5",
-})
-
-LATEST_GEN_FAMILIES: frozenset[str] = frozenset({
-    "t4g", "m7i", "m7g", "c7i", "c7g", "r7i", "r7g",
-    "inf2", "trn1",
-})
+NA = "N/A"
+NO_SAVINGS = "No Savings"
 
 
-def _flag_generation(family: str | None) -> str:
-    if not family:
-        return NA_FILL
-    f = family.lower()
-    if f in OLD_GEN_FAMILIES:
-        return "Old Gen"
-    if f in LATEST_GEN_FAMILIES:
-        return "Latest"
-    if f in CURRENT_GEN_FAMILIES:
-        return "Current"
-    return "Current"   # unknown → don't flag negatively
+def _row_matches_service(inst: str, service: ServiceMode) -> bool:
+    s = str(inst).strip().lower()
+    if not s or s in ("nan", "none"):
+        return False
+    is_rds = s.startswith("db.")
+    if service == "both":
+        return True
+    return is_rds if service == "rds" else not is_rds
 
 
-def _safe_price(instance: str | None, region: str, os_val: str) -> float | None:
-    if not instance:
+def _row_price_service(inst: str, mode: ServiceMode) -> Literal["ec2", "rds"]:
+    if mode == "rds":
+        return "rds"
+    if mode == "ec2":
+        return "ec2"
+    return "rds" if str(inst).strip().lower().startswith("db.") else "ec2"
+
+
+def _hourly_cur(inst: str, region: str, os_val: str, backend: Literal["ec2", "rds"]) -> float | None:
+    if backend == "rds":
+        return get_rds_hourly(inst, region=region, os=os_val)
+    return get_price(inst, region=region, os=os_val)
+
+
+def _hourly_alt(
+    alt: str | None, region: str, os_val: str, backend: Literal["ec2", "rds"]
+) -> float | None:
+    if not alt:
+        return None
+    return _hourly_cur(alt, region, os_val, backend)
+
+
+def _project_alt_cost(
+    actual: float | None, p_cur: float | None, p_alt: float | None
+) -> float | None:
+    if actual is None or actual <= 0 or p_cur is None or p_alt is None or p_cur <= 0:
+        return None
+    return round(actual * (p_alt / p_cur), 4)
+
+
+def _savings_display(actual: float | None, alt_cost: float | None) -> float | str | None:
+    if actual is None or actual <= 0 or alt_cost is None:
+        return None
+    if alt_cost >= actual:
+        return NO_SAVINGS
+    pct = round((actual - alt_cost) / actual * 100, 1)
+    return max(0.0, pct)
+
+
+def _to_float(v) -> float | None:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, str) and (not v.strip() or v.strip().lower() in ("nan", "n/a", "")):
         return None
     try:
-        return get_price(instance, region, os_val)
-    except Exception:
+        x = float(v)
+        if pd.isna(x):
+            return None
+        return x
+    except (TypeError, ValueError):
         return None
 
 
-def _safe_rec(instance: str) -> dict:
-    try:
-        return get_recommendations(instance)
-    except Exception:
-        return {"family": None, "size": None, "alt1": None, "alt2": None}
-
-
-def _savings_pct(orig: float | None, alt: float | None) -> float | None:
-    if orig and alt and orig > 0:
-        return round((orig - alt) / orig * 100, 1)
-    return None
-
-
-def process(df: pd.DataFrame, region: str = DEFAULT_REGION) -> pd.DataFrame:
-    """
-    Enrich the input DataFrame with AWS pricing + recommendations.
-    Guarantees ENRICHED_COLS immediately follow OS.
-    All original columns appended after, in original order, values unchanged.
-    """
+def process(
+    df: pd.DataFrame,
+    binding: ColumnBinding,
+    region: str = DEFAULT_REGION,
+    service: ServiceMode = "both",
+    cpu_filter: CPUFilterMode = "both",
+) -> pd.DataFrame:
     if df.empty:
         raise ValueError("Cannot process an empty DataFrame.")
-    for col in ("Instance Type", "OS"):
-        if col not in df.columns:
-            raise ValueError(f"Required column '{col}' is missing from the dataset.")
+    cols = list(df.columns)
+    if binding.instance not in cols or binding.os not in cols:
+        raise ValueError("Binding columns missing from DataFrame.")
+    try:
+        ins_idx = cols.index(binding.instance)
+    except ValueError as exc:
+        raise ValueError("Instance column not in DataFrame.") from exc
 
-    df = df.copy()
+    n = len(df)
+    ci, co = binding.instance, binding.os
+    cc = binding.actual_cost
 
-    # ── Vectorised enrichment ─────────────────────────────────────────────
-    od_prices, a1_insts, a1_prices, a2_insts, a2_prices = [], [], [], [], []
-    sizes, savings, gen_flags = [], [], []
+    actual_vals: list[float | None] = []
+    if cc and cc in cols:
+        raw_a = df[cc].tolist()
+        actual_vals = [_to_float(x) for x in raw_a]
+    else:
+        actual_vals = [None] * n
 
-    for _, row in df.iterrows():
-        inst   = str(row.get("Instance Type") or "").strip()
-        os_val = str(row.get("OS") or "linux").strip()
+    inst_series = df[ci].astype(str).str.strip()
+    os_series = df[co].astype(str).str.strip()
 
-        rec    = _safe_rec(inst)
-        family = rec.get("family")
-        size   = rec.get("size") or (parse_instance(inst) or (None, None))[1]
+    a1i: list = [None] * n
+    a1c: list = [None] * n
+    a1s: list = [None] * n
+    a2i: list = [None] * n
+    a2c: list = [None] * n
+    a2s: list = [None] * n
+    act_out: list = [None] * n
 
-        od  = _safe_price(inst, region, os_val)
+    cpu: CPUFilterMode = cpu_filter if cpu_filter in (
+        "default", "intel", "graviton", "both"
+    ) else "both"
 
-        a1  = rec.get("alt1")
-        a1p = _safe_price(a1, region, os_val) if a1 else None
+    for i in range(n):
+        inst = inst_series.iloc[i]
+        os_val = os_series.iloc[i] or "linux"
+        act = actual_vals[i]
+        act_out[i] = act
 
-        a2  = rec.get("alt2")
-        a2p = _safe_price(a2, region, os_val) if a2 else None
+        if not _row_matches_service(inst, service):
+            continue
 
-        # Prefer cheapest alt first
-        if od and a1p and a2p and a1p >= od and a2p < od:
-            a1, a1p, a2, a2p = a2, a2p, a1, a1p
+        backend = _row_price_service(inst, service)
+        rec = (
+            get_rds_recommendations(inst, cpu_filter=cpu)
+            if backend == "rds"
+            else get_recommendations(inst, cpu_filter=cpu)
+        )
 
-        sav   = _savings_pct(od, a1p)
-        g_flag = _flag_generation(family)
+        alt1 = rec.get("alt1")
+        alt2 = rec.get("alt2")
+        if alt1 and alt2 and alt1 == alt2:
+            alt2 = None
 
-        od_prices.append(round(od, 6)  if od  is not None else None)
-        a1_insts.append(a1)
-        a1_prices.append(round(a1p, 6) if a1p is not None else None)
-        a2_insts.append(a2)
-        a2_prices.append(round(a2p, 6) if a2p is not None else None)
-        sizes.append(size)
-        savings.append(sav)
-        gen_flags.append(g_flag)
+        p_cur = _hourly_cur(inst, region, os_val, backend)
+        p_a1 = _hourly_alt(alt1, region, os_val, backend)
+        p_a2 = _hourly_alt(alt2, region, os_val, backend)
 
-    # ── Build output with guaranteed column order ─────────────────────────
-    core     = ["Instance Type", "OS"]
-    trailing = [c for c in df.columns if c not in core]
+        # Keep Alt1 = next-gen path, Alt2 = second path (do not reorder by price).
 
-    out = df[core].copy()
-    out["On-Demand Price ($)"]     = od_prices
-    out["Alt 1 Instance"]          = a1_insts
-    out["Alt 1 Price ($)"]         = a1_prices
-    out["Alt 2 Instance"]          = a2_insts
-    out["Alt 2 Price ($)"]         = a2_prices
-    out["Size"]                    = sizes
-    out["Savings Opportunity (%)"] = savings
-    out["Generation Flag"]         = gen_flags
+        a1i[i] = alt1
+        a2i[i] = alt2
 
-    for col in trailing:
-        out[col] = df[col].values
+        c1 = _project_alt_cost(act, p_cur, p_a1)
+        c2 = _project_alt_cost(act, p_cur, p_a2)
+        a1c[i] = c1
+        a2c[i] = c2
+        a1s[i] = _savings_display(act, c1)
+        a2s[i] = _savings_display(act, c2)
 
-    # ── Integrity guards ──────────────────────────────────────────────────
-    assert list(out.columns[:2])  == ["Instance Type", "OS"],  "Core col order broken"
-    assert list(out.columns[2:10]) == ENRICHED_COLS,            "Enriched col order broken"
-    assert len(out.columns) == len(set(out.columns)),           "Duplicate columns"
-    assert len(out) == len(df),                                 "Row count changed"
+    left = df.iloc[:, : ins_idx + 1].copy()
+    right = df.iloc[:, ins_idx + 1 :].copy()
 
-    logger.info(f"Processed {len(out)} rows × {len(out.columns)} cols | region={region}")
+    mid = pd.DataFrame(
+        {
+            INSERT_COLS[0]: act_out,
+            INSERT_COLS[1]: a1i,
+            INSERT_COLS[2]: a1c,
+            INSERT_COLS[3]: a1s,
+            INSERT_COLS[4]: a2i,
+            INSERT_COLS[5]: a2c,
+            INSERT_COLS[6]: a2s,
+        },
+        index=df.index,
+    )
+
+    out = pd.concat([left, mid, right], axis=1)
+
+    assert len(out) == len(df), "Row count changed"
+    assert len(out.columns) == len(df.columns) + len(INSERT_COLS), "Column count wrong"
+    assert list(out.columns[: ins_idx + 1]) == list(df.columns[: ins_idx + 1])
+    assert list(out.columns[ins_idx + 1 + len(INSERT_COLS) :]) == list(
+        df.columns[ins_idx + 1 :]
+    )
+
+    for k in range(ins_idx + 1):
+        assert out.iloc[:, k].tolist() == df.iloc[:, k].tolist(), "mutated leading column"
+    for k in range(ins_idx + 1, len(df.columns)):
+        j = k + len(INSERT_COLS)
+        assert out.iloc[:, j].tolist() == df.iloc[:, k].tolist(), "mutated original trailing"
+
+    logger.info("Processed %s rows service=%s region=%s", len(out), service, region)
     return out
 
 
 def apply_na_fill(df: pd.DataFrame) -> pd.DataFrame:
-    """Replace None/NaN in computed columns with 'N/A'. For export only."""
+    """Export helper: None → N/A in inserted columns only."""
     df = df.copy()
-    for col in ENRICHED_COLS:
-        if col in df.columns:
-            df[col] = df[col].where(df[col].notna(), other=NA_FILL)
+    for c in INSERT_COLS:
+        if c not in df.columns:
+            continue
+        df[c] = df[c].apply(
+            lambda x: NA
+            if x is None or (isinstance(x, float) and pd.isna(x))
+            else x
+        )
     return df

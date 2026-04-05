@@ -2,13 +2,30 @@
 recommender.py
 --------------
 Maps EC2 instance families to recommended upgrade paths.
-Follows AWS generation progression and Graviton preference.
+CPU modes: default (match source arch), intel, graviton, both.
 """
+
+from __future__ import annotations
 
 import logging
 import re
+from typing import Literal
 
 logger = logging.getLogger(__name__)
+
+CPUFilterMode = Literal["default", "intel", "graviton", "both"]
+
+# GPU / special — trailing "g" is NOT Graviton
+_NON_GRAVITON_G: frozenset[str] = frozenset({
+    "g3", "g4dn", "g4ad", "g5", "g6", "g6e", "g5g",
+})
+
+
+def is_graviton_family(family: str) -> bool:
+    fam = family.lower().strip()
+    if fam in _NON_GRAVITON_G:
+        return False
+    return fam.endswith("g")
 
 # ---------------------------------------------------------------------------
 # Family upgrade map: family -> (alt1_family, alt2_family)
@@ -96,6 +113,62 @@ FAMILY_UPGRADE_MAP: dict[str, tuple[str, str]] = {
     "r6in":("r7i",  "r7i"),
 }
 
+# Intel-only (next gen x86, latest x86) — valid AWS progression
+INTEL_UPGRADE_MAP: dict[str, tuple[str, str]] = {
+    "t2": ("t3", "t3a"), "t3": ("t3a", "t3a"), "t3a": ("t3a", "t3a"),
+    "m1": ("m4", "m7i"), "m2": ("m4", "m7i"), "m3": ("m4", "m6i"),
+    "m4": ("m5", "m7i"), "m5": ("m6i", "m7i"), "m5a": ("m6i", "m7i"),
+    "m5n": ("m6i", "m7i"), "m5zn": ("m6i", "m7i"),
+    "m6i": ("m7i", "m7i"), "m6a": ("m7i", "m7i"),
+    "m6g": ("m7i", "m7i"), "m7i": ("m7i", "m7i"),
+    "m7g": ("m7i", "m7i"),
+    "c1": ("c4", "c7i"), "c3": ("c4", "c7i"), "c4": ("c5", "c7i"),
+    "c5": ("c6i", "c7i"), "c5a": ("c6i", "c7i"), "c5n": ("c6i", "c7i"),
+    "c6i": ("c7i", "c7i"), "c6a": ("c7i", "c7i"),
+    "c6g": ("c7i", "c7i"), "c7i": ("c7i", "c7i"), "c7g": ("c7i", "c7i"),
+    "r3": ("r4", "r7i"), "r4": ("r5", "r7i"), "r5": ("r6i", "r7i"),
+    "r5a": ("r6i", "r7i"), "r5b": ("r6i", "r7i"), "r5n": ("r6i", "r7i"),
+    "r6i": ("r7i", "r7i"), "r6a": ("r7i", "r7i"),
+    "r6g": ("r7i", "r7i"), "r7i": ("r7i", "r7i"), "r7g": ("r7i", "r7i"),
+    "x1": ("x2idn", "x2iedn"), "x1e": ("x2idn", "x2iedn"),
+    "x2idn": ("x2iedn", "x2iedn"),
+    "i2": ("i3", "i4i"), "i3": ("i3en", "i4i"), "i3en": ("i4i", "i4i"),
+    "i4i": ("i4i", "i4i"), "d2": ("d3", "d3"), "d3": ("d3", "d3"),
+    "h1": ("i3en", "i4i"),
+    "p2": ("p3", "p4d"), "p3": ("p4d", "p4d"), "p4d": ("p4d", "p4d"),
+    "g3": ("g4dn", "g5"), "g4dn": ("g5", "g5"), "g4ad": ("g5", "g5"),
+    "g5": ("g5", "g5"), "inf1": ("inf2", "inf2"), "inf2": ("inf2", "inf2"),
+    "trn1": ("trn1", "trn1"), "c6in": ("c7i", "c7gn"), "c7gn": ("c7gn", "c7gn"),
+}
+
+# Graviton-only (next Graviton, latest Graviton)
+GRAV_UPGRADE_MAP: dict[str, tuple[str, str]] = {
+    "t2": ("t3a", "t4g"), "t3": ("t4g", "t4g"), "t3a": ("t4g", "t4g"),
+    "t4g": ("t4g", "t4g"),
+    "m1": ("m4", "m7g"), "m2": ("m4", "m7g"), "m3": ("m4", "m6g"),
+    "m4": ("m5", "m7g"), "m5": ("m6g", "m7g"), "m5a": ("m6g", "m7g"),
+    "m5n": ("m6g", "m7g"), "m5zn": ("m6g", "m7g"),
+    "m6i": ("m6g", "m7g"), "m6g": ("m7g", "m7g"), "m6a": ("m6g", "m7g"),
+    "m7i": ("m7g", "m7g"), "m7g": ("m7g", "m7g"),
+    "c1": ("c4", "c7g"), "c3": ("c4", "c7g"), "c4": ("c5", "c7g"),
+    "c5": ("c6g", "c7g"), "c5a": ("c6g", "c7g"), "c5n": ("c6g", "c7g"),
+    "c6i": ("c6g", "c7g"), "c6g": ("c7g", "c7g"), "c6a": ("c6g", "c7g"),
+    "c7i": ("c7g", "c7g"), "c7g": ("c7g", "c7g"),
+    "r3": ("r4", "r7g"), "r4": ("r5", "r7g"), "r5": ("r6g", "r7g"),
+    "r5a": ("r6g", "r7g"), "r5b": ("r6g", "r7g"), "r5n": ("r6g", "r7g"),
+    "r6i": ("r6g", "r7g"), "r6g": ("r7g", "r7g"), "r6a": ("r6g", "r7g"),
+    "r7i": ("r7g", "r7g"), "r7g": ("r7g", "r7g"),
+    "x1": ("x2idn", "x2iedn"), "x1e": ("x2idn", "x2iedn"),
+    "x2idn": ("x2iedn", "x2iedn"),
+    "i2": ("i3", "i4i"), "i3": ("i3en", "i4i"), "i3en": ("i4i", "i4i"),
+    "i4i": ("i4i", "i4i"), "d2": ("d3", "d3"), "d3": ("d3", "d3"),
+    "h1": ("i3en", "i4i"),
+    "p2": ("p3", "p4d"), "p3": ("p4d", "p4d"), "p4d": ("p4d", "p4d"),
+    "g3": ("g4dn", "g5"), "g4dn": ("g5", "g5"), "g4ad": ("g5", "g5"),
+    "g5": ("g5", "g5"), "inf1": ("inf2", "inf2"), "inf2": ("inf2", "inf2"),
+    "trn1": ("trn1", "trn1"), "c6in": ("c7gn", "c7gn"), "c7gn": ("c7gn", "c7gn"),
+}
+
 # Sizes that map 1-to-1 across families
 VALID_SIZES = {
     "nano", "micro", "small", "medium", "large",
@@ -148,7 +221,47 @@ def build_alt(target_family: str, size: str) -> str | None:
     return candidate
 
 
-def get_recommendations(instance_type: str) -> dict[str, str | None]:
+def _lookup_upgrade(family: str, mode: CPUFilterMode) -> tuple[str, str] | None:
+    if mode == "both":
+        u = FAMILY_UPGRADE_MAP.get(family)
+        if u is None:
+            for key in FAMILY_UPGRADE_MAP:
+                if family.startswith(key):
+                    return FAMILY_UPGRADE_MAP[key]
+        return u
+    if mode == "intel":
+        u = INTEL_UPGRADE_MAP.get(family)
+        if u is None:
+            for key in INTEL_UPGRADE_MAP:
+                if family.startswith(key):
+                    return INTEL_UPGRADE_MAP[key]
+        return u
+    if mode == "graviton":
+        u = GRAV_UPGRADE_MAP.get(family)
+        if u is None:
+            for key in GRAV_UPGRADE_MAP:
+                if family.startswith(key):
+                    return GRAV_UPGRADE_MAP[key]
+        return u
+    # default — match source architecture
+    if is_graviton_family(family):
+        u = GRAV_UPGRADE_MAP.get(family)
+        if u is None:
+            for key in GRAV_UPGRADE_MAP:
+                if family.startswith(key):
+                    return GRAV_UPGRADE_MAP[key]
+        return u
+    u = INTEL_UPGRADE_MAP.get(family)
+    if u is None:
+        for key in INTEL_UPGRADE_MAP:
+            if family.startswith(key):
+                return INTEL_UPGRADE_MAP[key]
+    return u
+
+
+def get_recommendations(
+    instance_type: str, cpu_filter: CPUFilterMode = "both"
+) -> dict[str, str | None]:
     """
     Returns:
         {
@@ -164,23 +277,20 @@ def get_recommendations(instance_type: str) -> dict[str, str | None]:
 
     parsed = parse_instance(instance_type)
     if parsed is None:
-        logger.warning(f"Cannot parse instance type: {instance_type!r}")
+        logger.warning("Cannot parse instance type (value omitted for security)")
         return result
 
     family, size = parsed
     result["family"] = family
     result["size"] = size
 
-    upgrade = FAMILY_UPGRADE_MAP.get(family)
-    if upgrade is None:
-        # Try a prefix match (e.g. unknown sub-variant)
-        for key in FAMILY_UPGRADE_MAP:
-            if family.startswith(key):
-                upgrade = FAMILY_UPGRADE_MAP[key]
-                break
+    mode: CPUFilterMode = cpu_filter if cpu_filter in (
+        "default", "intel", "graviton", "both"
+    ) else "both"
+    upgrade = _lookup_upgrade(family, mode)
 
     if upgrade is None:
-        logger.debug(f"No upgrade path for family: {family}")
+        logger.debug("No upgrade path for family (details omitted)")
         # Default: same instance = no recommendation
         return result
 

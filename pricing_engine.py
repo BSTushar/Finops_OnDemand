@@ -25,6 +25,8 @@ cache_is_stale() → True when age > 7 days.
 import logging
 from datetime import datetime, timedelta
 
+from rds_mysql_sa_prices import RDS_MYSQL_SA_HOURLY
+
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_DAYS = 7
@@ -99,7 +101,7 @@ PRICE_CACHE: dict[str, dict[str,float]] = {
         "m6i.large":0.107,"m6i.xlarge":0.214,"m6i.2xlarge":0.428,
         "m6i.4xlarge":0.856,"m6i.8xlarge":1.712,"m6i.12xlarge":2.568,
         "m6i.16xlarge":3.424,"m6i.24xlarge":5.136,"m6i.32xlarge":6.848,
-        "m6g.medium":0.0432,"m6g.large":0.0864,"m6g.xlarge":0.1728,
+        "m6g.medium":0.0432,"m6g.large":0.086,"m6g.xlarge":0.1728,
         "m6g.2xlarge":0.3456,"m6g.4xlarge":0.6912,"m6g.8xlarge":1.3824,
         "m6g.12xlarge":2.0736,"m6g.16xlarge":2.7648,
         "m7i.large":0.1125,"m7i.xlarge":0.225,"m7i.2xlarge":0.45,
@@ -428,6 +430,31 @@ PRICE_CACHE: dict[str, dict[str,float]] = {
         "g5.24xlarge":10.594,"g5.48xlarge":21.188,
     },
 }
+
+
+def get_rds_hourly(
+    db_class: str, region: str = DEFAULT_REGION, os: str = "linux"
+) -> float | None:
+    """
+    RDS On-Demand compute ($/hr) from the AWS-published AmazonRDS offer snapshot
+    in ``rds_mysql_sa_prices`` (MySQL, Single-AZ, standard instance usage).
+    Returns None when the class is not in that dataset (no guessing). PostgreSQL
+    and other engines can differ; ``os`` is accepted for API parity only.
+    """
+    _ = os
+    if not db_class or not isinstance(db_class, str):
+        return None
+    s = db_class.strip().lower()
+    if not s.startswith("db."):
+        return None
+    rgn = (region or DEFAULT_REGION).lower().strip()
+    table = RDS_MYSQL_SA_HOURLY.get(rgn) or RDS_MYSQL_SA_HOURLY.get(DEFAULT_REGION)
+    if not table:
+        return None
+    p = table.get(s)
+    if p is None:
+        return None
+    return round(float(p), 6)
 
 
 def get_price(instance_type: str, region: str = DEFAULT_REGION, os: str = "linux") -> float | None:

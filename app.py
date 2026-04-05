@@ -1,685 +1,545 @@
 """
-app.py  ·  FinOps EC2 Optimizer  ·  v1.3
-=========================================
-Production Streamlit UI — Airbus-grade internal tooling.
-
-Features
---------
-✅  File upload (CSV / Excel)
-✅  Auto column detection + failsafe manual mapping dropdown
-✅  4-region dropdown (EU Ireland default)
-✅  Sticky-style virtual table header via CSS
-✅  Search + multi-filter (region, family, savings tier)
-✅  Colour-coded savings (green ≥20%, amber 5–20%)
-✅  Old-gen instance flagging (red badge)
-✅  KPI summary tiles
-✅  Savings-by-family bar chart
-✅  One-click Excel export (business-ready, formatted)
-✅  Docker-ready (runs on port 8501)
-
-Run locally:  streamlit run app.py
-Docker:       docker build -t finops . && docker run -p 8501:8501 finops
+app.py  ·  FinOps Optimizer
+===========================
+Strict column preservation, EC2/RDS separation, actual-cost savings.
+No external font/API calls in markup (system fonts only).
 """
+
+from __future__ import annotations
 
 import io
 import logging
-import traceback
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-from data_loader import load_file, LoadResult, ALL_EXPECTED, COLUMN_ALIASES
-from processor import process, apply_na_fill, ENRICHED_COLS
+from data_loader import LoadResult, finalize_binding, load_file
+from processor import apply_na_fill, process
 from pricing_engine import (
-    SUPPORTED_REGIONS, DEFAULT_REGION, REGION_LABELS,
-    CACHE_METADATA, cache_is_stale, cache_age_days,
+    CACHE_METADATA,
+    DEFAULT_REGION,
+    REGION_LABELS,
+    SUPPORTED_REGIONS,
+    cache_age_days,
+    cache_is_stale,
 )
 
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger(__name__)
 
-# ── Page ───────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="FinOps EC2 Optimizer",
+    page_title="FinOps Optimizer",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# ── CSS ────────────────────────────────────────────────────────────────────
-st.markdown("""
+# ── Theme-aware CSS (light + dark); no external URLs ───────────────────────
+st.markdown(
+    """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
-
 :root {
-  --bg:    #f4f5f7;
-  --card:  #ffffff;
-  --dark:  #1a1d23;
-  --mid:   #6b7280;
-  --light: #e2e5eb;
-  --green: #00955c;
-  --amber: #d97706;
-  --red:   #dc2626;
-  --blue:  #2563eb;
+  --fin-bg: #f4f5f7;
+  --fin-card: #ffffff;
+  --fin-text: #1a1d23;
+  --fin-muted: #6b7280;
+  --fin-border: #e2e5eb;
+  --fin-green: #00955c;
+  --fin-amber: #d97706;
+  --fin-red: #dc2626;
+  --fin-header-fg: #f0f2f5;
+  --fin-header-bg: #1a1d23;
 }
-
-html, body, [class*="css"] {
-  font-family: 'IBM Plex Sans', sans-serif;
-  background: var(--bg); color: var(--dark);
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fin-bg: #0e1117;
+    --fin-card: #1e2128;
+    --fin-text: #f3f4f6;
+    --fin-muted: #9ca3af;
+    --fin-border: #374151;
+    --fin-header-fg: #f9fafb;
+    --fin-header-bg: #111827;
+  }
 }
-
-/* ── Header ── */
+html, body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+/* Do not force .stApp color/background — Streamlit's own light/dark theme must control widgets. */
+.stApp {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  .metric { background: var(--fin-card); border-color: var(--fin-border); }
+  .metric-label { color: var(--fin-muted); }
+  .metric-value { color: var(--fin-text); }
+}
 .hdr {
-  background: var(--dark); color: #f0f2f5;
-  padding: 1.4rem 2rem 1.5rem; border-radius: 8px; margin-bottom: 1.1rem;
-  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .5rem;
-}
-.hdr-left h1 { margin: 0; font-size: 1.45rem; font-weight: 600; letter-spacing: -.3px; }
-.hdr-left p  { margin: .2rem 0 0; font-size: .8rem; color: #8a93a6; font-weight: 300; }
-.hdr-right   { text-align: right; font-size: .75rem; color: #8a93a6; line-height: 1.6; }
-.badge { display:inline-block; background:#00c27a; color:var(--dark);
-         font-size:.62rem; font-weight:700; padding:.12rem .45rem;
-         border-radius:3px; letter-spacing:.5px; text-transform:uppercase; margin-left:.5rem; }
-.pill { display:inline-block; font-size:.68rem; font-weight:600;
-        padding:.15rem .5rem; border-radius:10px; margin-left:.4rem; }
-.pill-ok   { background:#d1fae5; color:#065f46; }
-.pill-warn { background:#fef3c7; color:#92400e; }
-
-/* ── Section labels ── */
-.sec { font-size:.7rem; font-weight:600; color:var(--mid);
-       letter-spacing:.7px; text-transform:uppercase; margin-bottom:.45rem; }
-
-/* ── Metric boxes ── */
-.metric-row { display:flex; gap:.75rem; flex-wrap:wrap; margin-bottom:1rem; }
-.metric {
-  flex: 1 1 140px; background:var(--card); border:1px solid var(--light);
-  border-radius:8px; padding:1rem 1.1rem;
-}
-.metric-label { font-size:.68rem; font-weight:600; color:var(--mid);
-                letter-spacing:.5px; text-transform:uppercase; }
-.metric-value { font-size:1.6rem; font-weight:600; color:var(--dark);
-                font-family:'IBM Plex Mono',monospace; line-height:1.2; margin-top:.15rem; }
-.metric-sub   { font-size:.72rem; color:var(--mid); margin-top:.1rem; }
-.metric-green .metric-value { color: var(--green); }
-.metric-amber .metric-value { color: var(--amber); }
-
-/* ── Alert boxes ── */
-.box-ok   { background:#f0fdf4; border-left:3px solid #22c55e; border-radius:0 6px 6px 0; padding:.7rem 1rem; font-size:.82rem; color:#166534; margin:.5rem 0; }
-.box-warn { background:#fffbeb; border-left:3px solid #f59e0b; border-radius:0 6px 6px 0; padding:.7rem 1rem; font-size:.82rem; color:#92400e; margin:.5rem 0; }
-.box-err  { background:#fff1f2; border-left:3px solid #ef4444; border-radius:0 6px 6px 0; padding:.7rem 1rem; font-size:.82rem; color:#991b1b; margin:.5rem 0; }
-.box-info { background:#eff6ff; border-left:3px solid #3b82f6; border-radius:0 6px 6px 0; padding:.7rem 1rem; font-size:.82rem; color:#1e40af; margin:.5rem 0; }
-
-/* ── Table wrapper: sticky header via CSS ── */
-.table-wrap {
-  max-height: 520px;
-  overflow-y: auto;
-  border: 1px solid var(--light);
+  background: var(--fin-header-bg);
+  color: var(--fin-header-fg);
+  padding: 1.2rem 1.5rem;
   border-radius: 8px;
+  margin-bottom: 1rem;
 }
-/* Streamlit dataframe already handles scroll internally;
-   the above provides an outer containment boundary */
-
-/* ── Tag badges in table ── */
-.tag-old     { background:#fee2e2; color:#991b1b; font-size:.68rem; font-weight:700;
-               padding:.1rem .4rem; border-radius:3px; }
-.tag-current { background:#f3f4f6; color:#374151; font-size:.68rem;
-               padding:.1rem .4rem; border-radius:3px; }
-.tag-latest  { background:#d1fae5; color:#065f46; font-size:.68rem; font-weight:600;
-               padding:.1rem .4rem; border-radius:3px; }
-
-/* ── Savings legend ── */
-.legend { display:flex; gap:.75rem; align-items:center;
-          font-size:.75rem; color:var(--mid); margin-bottom:.5rem; flex-wrap:wrap; }
-.legend-dot { width:10px; height:10px; border-radius:2px; display:inline-block; margin-right:.3rem; }
-
-/* ── Upload ── */
-[data-testid="stFileUploader"] {
-  border: 2px dashed #c8cdd8 !important; border-radius: 8px !important;
-  background: #fafbfc !important;
+.hdr h1 { margin: 0; font-size: 1.35rem; font-weight: 600; }
+.hdr p { margin: 0.35rem 0 0; font-size: 0.8rem; opacity: 0.85; }
+.sec { font-size: 0.7rem; font-weight: 600; color: var(--fin-muted);
+       letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.35rem; }
+.metric-row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.metric {
+  flex: 1 1 120px;
+  background: var(--fin-card);
+  border: 1px solid var(--fin-border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
 }
-
-/* ── Buttons ── */
-.stButton>button, .stDownloadButton>button {
-  font-family: 'IBM Plex Sans', sans-serif !important;
-  font-weight: 500 !important; border-radius: 6px !important;
+.metric-label { font-size: 0.65rem; font-weight: 600; color: var(--fin-muted); }
+.metric-value { font-size: 1.35rem; font-weight: 600; color: var(--fin-text); margin-top: 0.15rem; }
+.box-ok, .box-warn, .box-err {
+  padding: 0.65rem 1rem;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.82rem;
+  margin: 0.4rem 0;
 }
-.stDownloadButton>button {
-  background: var(--dark) !important; color: #fff !important; border: none !important;
-}
-.stDownloadButton>button:hover { background: #2d3340 !important; }
-
-/* ── Misc ── */
+.box-ok { background: rgba(34, 197, 94, 0.12); border-left: 3px solid #22c55e; color: var(--fin-text); }
+.box-warn { background: rgba(245, 158, 11, 0.12); border-left: 3px solid #f59e0b; color: var(--fin-text); }
+.box-err { background: rgba(239, 68, 68, 0.12); border-left: 3px solid #ef4444; color: var(--fin-text); }
 #MainMenu, footer { visibility: hidden; }
-header[data-testid="stHeader"] { background: transparent; }
-.block-container { padding-top: 1.1rem; padding-bottom: 2rem; max-width: 1480px; }
-hr { border-color: var(--light); margin: 1rem 0; }
+.block-container { padding-top: 1rem; max-width: 1480px; }
+[data-testid="stDataFrame"] { max-height: 520px; overflow: auto !important; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Utility functions
-# ══════════════════════════════════════════════════════════════════════════
+def _savings_numeric(v) -> float | None:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, str):
+        if v.strip() == "No Savings":
+            return 0.0
+        try:
+            return float(v.replace("%", ""))
+        except ValueError:
+            return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
 
 def build_excel(df: pd.DataFrame, region_label: str) -> bytes:
-    """Return bytes of a formatted Excel workbook."""
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="EC2 Recommendations")
+        df.to_excel(writer, index=False, sheet_name="Recommendations")
         wb = writer.book
-        ws = writer.sheets["EC2 Recommendations"]
-
-        thin = Side(style="thin", color="D0D5DD")
-        bdr  = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-        # Header
+        ws = writer.sheets["Recommendations"]
+        thin = Side(style="thin", color="888888")
+        bdr = Border(left=thin, right=thin, top=thin, bottom=thin)
         hdr_fill = PatternFill("solid", fgColor="1A1D23")
-        hdr_font = Font(bold=True, color="FFFFFF", size=10, name="Calibri")
+        hdr_font = Font(bold=True, color="FFFFFF", size=10)
         for cidx in range(1, ws.max_column + 1):
             c = ws.cell(row=1, column=cidx)
-            c.font = hdr_font; c.fill = hdr_fill; c.border = bdr
+            c.font = hdr_font
+            c.fill = hdr_fill
+            c.border = bdr
             c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-        # Column index maps
-        col_names   = df.columns.tolist()
-        sav_cidx    = (col_names.index("Savings Opportunity (%)") + 1
-                       if "Savings Opportunity (%)" in col_names else None)
-        gen_cidx    = (col_names.index("Generation Flag") + 1
-                       if "Generation Flag" in col_names else None)
-        price_cidxs = {col_names.index(c) + 1
-                       for c in col_names if "Price" in c}
-
+        sav_cols = [c for c in df.columns if "Savings %" in c]
+        price_cols = [c for c in df.columns if "Cost ($)" in c]
         green_fill = PatternFill("solid", fgColor="D1FAE5")
         amber_fill = PatternFill("solid", fgColor="FEF3C7")
-        red_fill   = PatternFill("solid", fgColor="FEE2E2")
-        norm_font  = Font(size=10, name="Calibri")
-        mono_font  = Font(size=9,  name="Courier New")
-
+        red_fill = PatternFill("solid", fgColor="FEE2E2")
+        col_list = list(df.columns)
         for ridx in range(2, ws.max_row + 1):
             for cidx in range(1, ws.max_column + 1):
                 cell = ws.cell(row=ridx, column=cidx)
                 cell.border = bdr
                 cell.alignment = Alignment(vertical="center")
-                if cell.value == "N/A":
-                    cell.number_format = "@"
-                    cell.font = Font(size=10, name="Calibri", color="9CA3AF")
-                elif cidx in price_cidxs:
-                    cell.font = mono_font
-                    cell.number_format = '$#,##0.0000'
+                cell.font = Font(size=10)
+            for name in sav_cols:
+                if name not in col_list:
+                    continue
+                ci = col_list.index(name) + 1
+                sc = ws.cell(row=ridx, column=ci)
+                val = sc.value
+                nv = _savings_numeric(val)
+                if nv is None:
+                    continue
+                if nv >= 20:
+                    sc.fill = green_fill
+                elif nv > 0:
+                    sc.fill = amber_fill
                 else:
-                    cell.font = norm_font
-
-            # Savings colour
-            if sav_cidx:
-                sc = ws.cell(row=ridx, column=sav_cidx)
-                try:
-                    fv = float(sc.value)
-                    if fv >= 20:
-                        sc.fill = green_fill
-                        sc.font = Font(bold=True, color="065F46", size=10, name="Calibri")
-                        sc.number_format = '0.0"%"'
-                    elif fv >= 5:
-                        sc.fill = amber_fill
-                        sc.font = Font(bold=True, color="92400E", size=10, name="Calibri")
-                        sc.number_format = '0.0"%"'
-                except Exception:
-                    pass
-
-            # Old gen colour
-            if gen_cidx:
-                gc = ws.cell(row=ridx, column=gen_cidx)
-                if gc.value == "Old Gen":
-                    gc.fill = red_fill
-                    gc.font = Font(bold=True, color="991B1B", size=10, name="Calibri")
-                elif gc.value == "Latest":
-                    gc.fill = green_fill
-                    gc.font = Font(bold=True, color="065F46", size=10, name="Calibri")
-
-        # Auto-width
+                    sc.fill = red_fill
+            for name in price_cols:
+                if name not in col_list:
+                    continue
+                ci = col_list.index(name) + 1
+                ws.cell(row=ridx, column=ci).number_format = "$#,##0.0000"
         for col_cells in ws.columns:
             w = max((len(str(c.value or "")) for c in col_cells), default=8)
-            ws.column_dimensions[col_cells[0].column_letter].width = min(w + 3, 48)
-
+            ws.column_dimensions[col_cells[0].column_letter].width = min(w + 2, 48)
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
-        ws.row_dimensions[1].height = 36
-
-        # Metadata sheet
         ws_m = wb.create_sheet("Metadata")
         ws_m.append(["Field", "Value"])
-        ws_m.append(["Generated at",    datetime.now().strftime("%Y-%m-%d %H:%M UTC")])
-        ws_m.append(["Pricing region",  region_label])
+        ws_m.append(["Generated at", datetime.now().strftime("%Y-%m-%d %H:%M")])
+        ws_m.append(["Pricing region", region_label])
         ws_m.append(["Pricing vintage", CACHE_METADATA["last_updated"].strftime("%Y-%m-%d")])
-        ws_m.append(["Source",          CACHE_METADATA["source"]])
-        ws_m.append(["Total rows",      len(df)])
-        n_opt = sum(1 for v in df.get("Savings Opportunity (%)", [])
-                    if v not in (None, "N/A") and str(v) not in ("nan", ""))
-        ws_m.append(["Optimisable rows", n_opt])
-        for cell in ws_m[1]:
-            cell.font = Font(bold=True, name="Calibri")
+        ws_m.append(["Rows", len(df)])
     return buf.getvalue()
 
 
+def _savings_for_kpi(v) -> float | None:
+    """Mean KPI: exclude N/A and 'No Savings' (treat as no positive saving %)."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, str) and v.strip() == "No Savings":
+        return None
+    return _savings_numeric(v)
+
+
 def kpis(df: pd.DataFrame) -> dict:
-    sav = pd.to_numeric(df.get("Savings Opportunity (%)", pd.Series(dtype=float)),
-                        errors="coerce")
-    old_gen_n = (df.get("Generation Flag", pd.Series()) == "Old Gen").sum()
-    return dict(
-        total      = len(df),
-        with_sav   = int(sav.notna().sum()),
-        avg_sav    = sav.dropna().mean(),
-        max_sav    = sav.dropna().max(),
-        old_gen_n  = int(old_gen_n),
-        cost_total = df["Cost"].sum() if "Cost" in df.columns else None,
-        potential  = (df["Cost"] * sav / 100).sum()
-                     if "Cost" in df.columns else None,
+    s1 = pd.Series(
+        [_savings_for_kpi(x) for x in df.get("Alt1 Savings %", [])], dtype=float
     )
+    s1 = s1.dropna()
+    return {
+        "total": len(df),
+        "avg1": s1.mean() if len(s1) else None,
+        "max1": s1.max() if len(s1) else None,
+        "act_col": "Actual Cost ($)" in df.columns,
+    }
 
 
 def render_kpis(k: dict):
-    cols = st.columns(6)
-    data = [
-        ("Instances",          f"{k['total']:,}",                     "",   ""),
-        ("Optimisable",        f"{k['with_sav']:,}",                  "",   ""),
-        ("Old Gen ⚠️",         f"{k['old_gen_n']:,}",                 "",   "metric-amber" if k['old_gen_n'] else ""),
-        ("Avg Savings",        f"{k['avg_sav']:.1f}%" if k['avg_sav'] else "—", "", "metric-green" if k['avg_sav'] else ""),
-        ("Max Savings",        f"{k['max_sav']:.1f}%" if k['max_sav'] else "—", "", ""),
-        ("Est. Monthly Save",  f"${k['potential']:,.0f}" if k['potential'] else "—",
-                               f"of ${k['cost_total']:,.0f}" if k['cost_total'] else "", "metric-green" if k['potential'] else ""),
-    ]
-    for col, (label, val, sub, cls) in zip(cols, data):
-        with col:
-            st.markdown(f"""
-            <div class="metric {cls}">
-              <div class="metric-label">{label}</div>
-              <div class="metric-value">{val}</div>
-              {'<div class="metric-sub">'+sub+'</div>' if sub else ''}
-            </div>""", unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(
+            f'<div class="metric"><div class="metric-label">Rows</div>'
+            f'<div class="metric-value">{k["total"]:,}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        v = f"{k['avg1']:.1f}%" if k["avg1"] is not None else "—"
+        st.markdown(
+            f'<div class="metric"><div class="metric-label">Avg Alt1 savings</div>'
+            f'<div class="metric-value">{v}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c3:
+        v = f"{k['max1']:.1f}%" if k["max1"] is not None else "—"
+        st.markdown(
+            f'<div class="metric"><div class="metric-label">Max Alt1 savings</div>'
+            f'<div class="metric-value">{v}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            f'<div class="metric"><div class="metric-label">Actual cost column</div>'
+            f'<div class="metric-value">{"Yes" if k["act_col"] else "No"}</div></div>',
+            unsafe_allow_html=True,
+        )
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# Session state
-# ══════════════════════════════════════════════════════════════════════════
-for key in ("result", "load_result", "region_id"):
+# ── Session ────────────────────────────────────────────────────────────────
+for key, default in (
+    ("load_result", None),
+    ("result", None),
+    ("region_id", DEFAULT_REGION),
+    ("service", "both"),
+    ("cpu_filter", "both"),
+    ("cost_pick", None),
+):
     if key not in st.session_state:
-        st.session_state[key] = None
-if "region_id" not in st.session_state or st.session_state["region_id"] is None:
-    st.session_state["region_id"] = DEFAULT_REGION
+        st.session_state[key] = default
 
+stale = cache_is_stale()
+pill = f"Cache {cache_age_days()}d — refresh due" if stale else "Cache fresh"
 
-# ══════════════════════════════════════════════════════════════════════════
-# HEADER
-# ══════════════════════════════════════════════════════════════════════════
-stale    = cache_is_stale()
-pill_cls = "pill-warn" if stale else "pill-ok"
-pill_txt = f"Cache {cache_age_days()}d — refresh due" if stale else f"Cache fresh"
-
-st.markdown(f"""
+st.markdown(
+    f"""
 <div class="hdr">
-  <div class="hdr-left">
-    <h1>💰 FinOps EC2 Optimizer <span class="badge">v1.3</span>
-        <span class="pill {pill_cls}">{pill_txt}</span></h1>
-    <p>Upload EC2 billing data · Select pricing region · Download enriched Excel with upgrade recommendations</p>
-  </div>
-  <div class="hdr-right">
-    Pricing: AWS On-Demand, verified Mar 2025<br>
-    Regions: EU Ireland · US Virginia · AP Mumbai · EU Frankfurt
-  </div>
+  <h1>💰 FinOps Optimizer <span style="opacity:0.85;font-size:0.75rem">({pill})</span></h1>
+  <p>EC2 & RDS · Actual-cost savings · Local pricing only · Original columns preserved</p>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
+# ── Controls row ─────────────────────────────────────────────────────────────
+up_col, reg_col, svc_col, cpu_col, go_col = st.columns([3, 2, 1, 1, 1])
 
-# ══════════════════════════════════════════════════════════════════════════
-# INPUT ROW: Upload + Region + Process button
-# ══════════════════════════════════════════════════════════════════════════
-c_up, c_reg, c_btn = st.columns([4, 3, 1])
-
-with c_up:
+with up_col:
     uploaded = st.file_uploader(
-        "file", type=["csv", "xlsx", "xls"],
+        "file",
+        type=["csv", "xlsx", "xls"],
         label_visibility="collapsed",
-        help="Required: Instance Type, OS. Optional: Cost, Usage, Region, Account, Application",
     )
-    st.caption("📎 CSV or Excel · Auto-detects columns · Case-insensitive matching")
+    st.caption("Upload CSV / Excel — all columns kept in order")
 
-with c_reg:
-    st.markdown('<div class="sec">Pricing Region</div>', unsafe_allow_html=True)
+with reg_col:
+    st.markdown('<div class="sec">Pricing region</div>', unsafe_allow_html=True)
     region_opts = [f"{label}  [{rid}]" for rid, label in SUPPORTED_REGIONS]
     default_idx = [r for r, _ in SUPPORTED_REGIONS].index(DEFAULT_REGION)
-    sel_disp    = st.selectbox("region", region_opts, index=default_idx,
-                               label_visibility="collapsed")
-    sel_region  = [r for r, _ in SUPPORTED_REGIONS][region_opts.index(sel_disp)]
+    sel_disp = st.selectbox(
+        "region", region_opts, index=default_idx, label_visibility="collapsed"
+    )
+    sel_region = [r for r, _ in SUPPORTED_REGIONS][region_opts.index(sel_disp)]
     st.session_state["region_id"] = sel_region
 
-with c_btn:
+with svc_col:
+    st.markdown('<div class="sec">Service</div>', unsafe_allow_html=True)
+    st.session_state["service"] = st.radio(
+        "svc",
+        ["ec2", "rds", "both"],
+        format_func=lambda x: {"ec2": "EC2", "rds": "RDS", "both": "Both"}[x],
+        label_visibility="collapsed",
+        horizontal=True,
+    )
+
+with cpu_col:
+    st.markdown('<div class="sec">CPU</div>', unsafe_allow_html=True)
+    st.session_state["cpu_filter"] = st.selectbox(
+        "cpu",
+        ["both", "default", "intel", "graviton"],
+        format_func=lambda x: {
+            "both": "Both",
+            "default": "Default",
+            "intel": "Intel",
+            "graviton": "Graviton",
+        }[x],
+        label_visibility="collapsed",
+    )
+
+with go_col:
     st.markdown("<br>", unsafe_allow_html=True)
-    run = st.button("⚙️  Process", type="primary",
-                    disabled=(uploaded is None), use_container_width=True)
+    run = st.button("Process", type="primary", disabled=uploaded is None, use_container_width=True)
 
 st.markdown("---")
 
-# ── Sample expander ────────────────────────────────────────────────────────
-with st.expander("📄 View Sample Input  /  Download Template"):
-    sample_df = pd.DataFrame({
-        "Instance Type": ["m4.large","c4.xlarge","r4.2xlarge","t2.medium","m5.xlarge",
-                          "c5.2xlarge","r5.large","i3.large","m6i.4xlarge","t3.micro"],
-        "OS":    ["Linux","Linux","Linux","Windows","Linux","RHEL","Linux","Linux","Linux","Linux"],
-        "Cost":  [73.2,145.0,389.0,35.0,140.0,250.0,92.0,114.0,584.0,8.5],
-        "Usage": [720]*10,
-        "Region":["eu-west-1"]*10,
-        "Account":["prod-eu"]*10,
-        "Application":["WebFrontend","APIGateway","DataWarehouse","DevServer","AppServer",
-                       "BatchProcessor","Analytics","Storage","WebFrontend","CI-CD"],
-    })
-    st.dataframe(sample_df, use_container_width=True, hide_index=True)
-    st.download_button("⬇ Download Sample CSV", sample_df.to_csv(index=False).encode(),
-                       "sample_ec2_input.csv", "text/csv")
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# PROCESSING STEP
-# ══════════════════════════════════════════════════════════════════════════
+# ── Load + column binding ─────────────────────────────────────────────────
 if run and uploaded:
-    with st.spinner("Reading file and detecting columns…"):
+    with st.spinner("Loading…"):
         try:
             lr: LoadResult = load_file(uploaded, uploaded.name)
             st.session_state["load_result"] = lr
-            st.session_state["result"] = None   # reset previous result
-
+            st.session_state["result"] = None
+            st.session_state["cost_pick"] = None
+            st.session_state["binding"] = None
+            st.session_state.pop("_enrich_svc", None)
+            st.session_state.pop("_enrich_cpu", None)
             for w in lr.warnings:
                 st.markdown(f'<div class="box-warn">⚠️ {w}</div>', unsafe_allow_html=True)
-
-            if not lr.needs_manual_mapping:
-                result = process(lr.df, region=sel_region)
-                st.session_state["result"] = result
-                label = REGION_LABELS.get(sel_region, sel_region)
-                st.markdown(
-                    f'<div class="box-ok">✅ Processed <strong>{len(result):,}</strong> rows '
-                    f'from <code>{uploaded.name}</code>  ·  Region: <strong>{label}</strong></div>',
-                    unsafe_allow_html=True)
-
         except ValueError as ve:
             st.session_state["load_result"] = None
-            st.session_state["result"] = None
-            st.markdown(f'<div class="box-err">❌ <strong>Error:</strong> {ve}</div>',
-                        unsafe_allow_html=True)
-        except Exception:
+            st.markdown(f'<div class="box-err">❌ {ve}</div>', unsafe_allow_html=True)
+        except Exception as e:
             st.session_state["load_result"] = None
-            st.session_state["result"] = None
-            tb = traceback.format_exc()
-            log.error(tb)
-            st.markdown(
-                f'<div class="box-err">❌ Unexpected error — check file format.'
-                f'<details><summary>Details</summary><pre style="font-size:.7rem">{tb[-600:]}</pre></details></div>',
-                unsafe_allow_html=True)
+            # Do not log tracebacks or filenames — may leak sensitive context (Airbus internal policy).
+            log.error("load_file failed: %s", type(e).__name__)
+            st.markdown('<div class="box-err">❌ Failed to read file.</div>', unsafe_allow_html=True)
 
-
-# ══════════════════════════════════════════════════════════════════════════
-# FAILSAFE: Manual column mapping UI
-# ══════════════════════════════════════════════════════════════════════════
 lr: LoadResult | None = st.session_state.get("load_result")
+binding_ready = False
+chosen_binding = None
+if st.session_state.get("binding") is not None:
+    chosen_binding = st.session_state["binding"]
+    binding_ready = True
 
-if lr and lr.needs_manual_mapping and st.session_state.get("result") is None:
-    st.markdown("---")
-    st.markdown("""
-    <div class="box-warn">
-      ⚠️ <strong>Column detection incomplete.</strong>
-      Some required columns could not be automatically identified.
-      Please map them manually below.
-    </div>""", unsafe_allow_html=True)
+if lr is not None and not binding_ready:
+    cols_all = list(lr.df.columns)
 
-    st.markdown('<div class="sec">Manual Column Mapping</div>', unsafe_allow_html=True)
-    st.caption(f"Columns found in file: **{', '.join(lr.df.columns.tolist())}**")
-
-    available_raw = ["— not in file —"] + lr.df.columns.tolist()
-    canonical_needed = sorted(lr.missing_required)
-    user_mapping: dict[str, str] = {}
-
-    mapping_cols = st.columns(min(len(canonical_needed), 4))
-    for i, canon in enumerate(canonical_needed):
-        with mapping_cols[i % 4]:
-            # Pre-select best guess
-            guess_idx = 0
-            for j, raw in enumerate(available_raw[1:], start=1):
-                if canon.lower().replace(" ", "") in raw.lower().replace(" ", ""):
-                    guess_idx = j; break
-            sel = st.selectbox(f"→ {canon}", available_raw, index=guess_idx, key=f"map_{canon}")
-            if sel != "— not in file —":
-                user_mapping[sel] = canon
-
-    if st.button("✅ Apply Mapping & Process", type="primary"):
-        if len(user_mapping) < len(canonical_needed):
-            st.markdown(
-                f'<div class="box-err">❌ Please map all required columns: '
-                f'{", ".join(canonical_needed)}</div>', unsafe_allow_html=True)
+    if lr.needs_instance_pick or lr.needs_os_pick:
+        st.markdown('<div class="sec">Column mapping (required)</div>', unsafe_allow_html=True)
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            di = 0
+            if lr.instance_candidates:
+                di = cols_all.index(lr.instance_candidates[0]) if lr.instance_candidates[0] in cols_all else 0
+            inst_sel = st.selectbox("Instance / DB class column", cols_all, index=min(di, len(cols_all) - 1))
+        with mc2:
+            do = 0
+            if lr.os_candidates:
+                do = cols_all.index(lr.os_candidates[0]) if lr.os_candidates[0] in cols_all else 0
+            os_sel = st.selectbox("OS / engine column", cols_all, index=min(do, len(cols_all) - 1))
+        cost_sel = None
+        if len(lr.cost_candidates) > 1:
+            cost_sel = st.selectbox(
+                "Actual cost column (required for savings)",
+                lr.cost_candidates,
+                key="cost_ambiguous",
+            )
+        elif len(lr.cost_candidates) == 1:
+            cost_sel = lr.cost_candidates[0]
         else:
+            cost_sel = st.selectbox(
+                "Actual cost column (optional)",
+                ["— None —"] + cols_all,
+                key="cost_optional",
+            )
+            if cost_sel == "— None —":
+                cost_sel = None
+        if st.button("Apply column mapping", type="primary"):
             try:
-                new_lr = lr.apply_mapping(user_mapping)
-                if new_lr.needs_manual_mapping:
-                    st.markdown(
-                        f'<div class="box-err">❌ Still missing: '
-                        f'{", ".join(sorted(new_lr.missing_required))}</div>',
-                        unsafe_allow_html=True)
-                else:
-                    result = process(new_lr.df, region=st.session_state["region_id"])
-                    st.session_state["result"] = result
-                    st.session_state["load_result"] = new_lr
-                    st.markdown(
-                        f'<div class="box-ok">✅ Processed <strong>{len(result):,}</strong> rows '
-                        f'with manual column mapping.</div>', unsafe_allow_html=True)
-                    st.rerun()
+                b = finalize_binding(lr, inst_sel, os_sel, cost_sel).binding
+                st.session_state["binding"] = b
+                st.session_state["cost_pick"] = cost_sel
+                st.rerun()
+            except ValueError as e:
+                st.markdown(f'<div class="box-err">❌ {e}</div>', unsafe_allow_html=True)
+    elif lr.binding is not None:
+        if len(lr.cost_candidates) > 1 and lr.binding.actual_cost is None:
+            st.markdown(
+                '<div class="box-warn">Multiple cost columns — pick one for Actual Cost.</div>',
+                unsafe_allow_html=True,
+            )
+            cp = st.selectbox("Actual cost column", lr.cost_candidates, key="cost_pick_multi")
+            if st.button("Confirm cost column", type="primary"):
+                b = finalize_binding(lr, lr.binding.instance, lr.binding.os, cp).binding
+                st.session_state["binding"] = b
+                st.rerun()
+        else:
+            if st.session_state.get("binding") is None:
+                st.session_state["binding"] = lr.binding
+
+if lr is not None and st.session_state.get("binding") is not None:
+    chosen_binding = st.session_state["binding"]
+    binding_ready = True
+    if st.session_state.get("result") is None:
+        if st.button("Run enrichment", type="primary", key="run_enrich"):
+            try:
+                svc = st.session_state["service"]
+                cpu = st.session_state["cpu_filter"]
+                reg = st.session_state.get("region_id", DEFAULT_REGION)
+                out = process(
+                    lr.df,
+                    chosen_binding,
+                    region=reg,
+                    service=svc,
+                    cpu_filter=cpu,
+                )
+                st.session_state["result"] = out
+                st.session_state["_enrich_svc"] = svc
+                st.session_state["_enrich_cpu"] = cpu
+                st.success(f"Enriched {len(out):,} rows")
+                st.rerun()
             except Exception as ex:
                 st.markdown(f'<div class="box-err">❌ {ex}</div>', unsafe_allow_html=True)
+                log.error("process failed: %s", type(ex).__name__)
 
-
-# ══════════════════════════════════════════════════════════════════════════
-# RESULTS PANEL
-# ══════════════════════════════════════════════════════════════════════════
 df_out: pd.DataFrame | None = st.session_state.get("result")
 
 if df_out is not None:
-    k = kpis(df_out)
+    if (
+        st.session_state.get("_enrich_svc") != st.session_state.get("service")
+        or st.session_state.get("_enrich_cpu") != st.session_state.get("cpu_filter")
+    ):
+        st.warning(
+            "Service or CPU mode changed since last enrichment — click **Run enrichment** to refresh."
+        )
+    st.markdown('<div class="sec">Filter bar</div>', unsafe_allow_html=True)
+    f1, f2, f3, f4 = st.columns([1, 1, 1, 3])
+    with f1:
+        vf_svc = st.radio(
+            "View service",
+            ["all", "ec2", "rds"],
+            format_func=lambda x: {
+                "all": "Both (show all)",
+                "ec2": "EC2 rows only",
+                "rds": "RDS rows only",
+            }[x],
+            horizontal=True,
+        )
+    with f2:
+        st.caption("CPU (enrichment)")
+        st.write(str(st.session_state.get("cpu_filter", "both")).title())
+    with f3:
+        vf_os = st.text_input("OS contains", placeholder="filter…")
+    with f4:
+        q = st.text_input("Search", placeholder="any column…")
 
-    # KPI row
-    st.markdown('<div class="sec" style="margin-top:1.1rem">Summary</div>',
-                unsafe_allow_html=True)
-    render_kpis(k)
-
-    st.markdown("---")
-
-    # ── Legend ────────────────────────────────────────────────────────────
-    st.markdown("""
-    <div class="legend">
-      <span><span class="legend-dot" style="background:#D1FAE5"></span>Savings ≥20%</span>
-      <span><span class="legend-dot" style="background:#FEF3C7"></span>Savings 5–20%</span>
-      <span><span class="legend-dot" style="background:#FEE2E2"></span>Old Generation</span>
-      <span><span class="legend-dot" style="background:#D1FAE5;border:1px solid #065f46"></span>Latest Gen</span>
-    </div>""", unsafe_allow_html=True)
-
-    # ── Filters ───────────────────────────────────────────────────────────
-    st.markdown('<div class="sec">Filter & Search</div>', unsafe_allow_html=True)
-    fc1, fc2, fc3, fc4, fc5 = st.columns([3, 2, 2, 2, 2])
-
-    with fc1:
-        srch = st.text_input("Search", placeholder="instance, app, account…",
-                             label_visibility="collapsed")
-    with fc2:
-        rgn_vals = (["All"] + sorted(df_out["Region"].dropna().unique().tolist())
-                    if "Region" in df_out.columns else ["All"])
-        sel_rgn = st.selectbox("Region", rgn_vals, label_visibility="collapsed")
-    with fc3:
-        fam_vals = ["All"] + sorted({
-            str(x).split(".")[0] for x in df_out["Instance Type"].dropna()
-            if "." in str(x)
-        })
-        sel_fam = st.selectbox("Family", fam_vals, label_visibility="collapsed")
-    with fc4:
-        sav_opts = ["All", "≥20% High", "5–20% Med", "0–5% Low", "No Rec"]
-        sel_sav  = st.selectbox("Savings", sav_opts, label_visibility="collapsed")
-    with fc5:
-        gen_opts = ["All", "Old Gen", "Current", "Latest"]
-        sel_gen  = st.selectbox("Generation", gen_opts, label_visibility="collapsed")
-
-    # ── Apply filters ──────────────────────────────────────────────────────
     view = df_out.copy()
+    bind = st.session_state.get("binding")
+    inst_col = bind.instance if bind else None
 
-    if srch:
-        mask = pd.Series(False, index=view.index)
-        for col in view.select_dtypes(include="object").columns:
-            mask |= view[col].astype(str).str.contains(srch, case=False, na=False)
-        view = view[mask]
+    if vf_svc == "ec2" and inst_col and inst_col in view.columns:
+        view = view[~view[inst_col].astype(str).str.lower().str.strip().str.startswith("db.")]
+    elif vf_svc == "rds" and inst_col and inst_col in view.columns:
+        view = view[view[inst_col].astype(str).str.lower().str.strip().str.startswith("db.")]
 
-    if "Region" in view.columns and sel_rgn != "All":
-        view = view[view["Region"] == sel_rgn]
-    if sel_fam != "All":
-        view = view[view["Instance Type"].astype(str).str.startswith(sel_fam + ".", na=False)]
-    if sel_gen != "All" and "Generation Flag" in view.columns:
-        view = view[view["Generation Flag"] == sel_gen]
+    os_col_name = bind.os if bind else None
+    if vf_os and os_col_name and os_col_name in view.columns:
+        view = view[view[os_col_name].astype(str).str.contains(vf_os, case=False, na=False)]
 
-    num_sav = pd.to_numeric(view.get("Savings Opportunity (%)", pd.Series()), errors="coerce")
-    if sel_sav == "≥20% High":
-        view = view[num_sav >= 20]
-    elif sel_sav == "5–20% Med":
-        view = view[(num_sav >= 5) & (num_sav < 20)]
-    elif sel_sav == "0–5% Low":
-        view = view[(num_sav >= 0) & (num_sav < 5)]
-    elif sel_sav == "No Rec":
-        view = view[num_sav.isna()]
+    if q:
+        m = pd.Series(False, index=view.index)
+        for col in view.columns:
+            m |= view[col].astype(str).str.contains(q, case=False, na=False)
+        view = view[m]
 
     st.caption(f"Showing **{len(view):,}** of **{len(df_out):,}** rows")
 
-    # ── Table with colour styling ─────────────────────────────────────────
-    st.markdown('<div class="sec" style="margin-top:.3rem">Recommendations</div>',
-                unsafe_allow_html=True)
+    render_kpis(kpis(view))
 
-    def _colour_sav(v):
-        try:
-            f = float(v)
-            if f >= 20:  return "color:#00955c;font-weight:700"
-            if f >= 5:   return "color:#d97706;font-weight:600"
-            if f >= 0:   return "color:#374151"
-            return "color:#dc2626;font-weight:600"
-        except Exception:
-            return "color:#9ca3af"
+    def _style_sav(v: str) -> str:
+        n = _savings_numeric(v)
+        if n is None:
+            return "color: #9ca3af"
+        if n >= 20:
+            return "color: #22c55e; font-weight:700"
+        if n > 0:
+            return "color: #d97706; font-weight:600"
+        return "color: #dc2626; font-weight:600"
 
-    def _colour_gen(v):
-        if v == "Old Gen":  return "color:#dc2626;font-weight:700"
-        if v == "Latest":   return "color:#00955c;font-weight:600"
-        return "color:#6b7280"
+    def _fmt_cell(cname: str):
+        def _f(x):
+            if "Savings %" in cname:
+                if pd.isna(x) or x is None:
+                    return "N/A"
+                return str(x) if isinstance(x, str) else f"{float(x):.1f}%"
+            if "Cost ($)" in cname:
+                if pd.isna(x) or x is None:
+                    return "N/A"
+                if isinstance(x, (int, float)):
+                    return f"${float(x):,.4f}"
+                return str(x)
+            return x
 
-    def _fmt(x, fmt_str="${}"):
-        if pd.isna(x) or x in (None, "N/A") or str(x) in ("nan", ""):
-            return "N/A"
-        try:
-            return fmt_str.format(f"{float(x):.4f}")
-        except Exception:
-            return str(x)
+        return _f
 
-    fmt_map: dict = {
-        "On-Demand Price ($)":     lambda x: _fmt(x, "${}"),
-        "Alt 1 Price ($)":         lambda x: _fmt(x, "${}"),
-        "Alt 2 Price ($)":         lambda x: _fmt(x, "${}"),
-        "Savings Opportunity (%)": lambda x: (
-            "N/A" if pd.isna(x) or x in (None, "N/A") else f"{float(x):.1f}%"
-        ),
-    }
-    if "Cost"  in view.columns:
-        fmt_map["Cost"]  = lambda x: f"${x:,.2f}" if pd.notna(x) else "—"
-    if "Usage" in view.columns:
-        fmt_map["Usage"] = lambda x: f"{x:,.0f}"  if pd.notna(x) else "—"
-
-    style_cols = {}
-    if "Savings Opportunity (%)" in view.columns:
-        style_cols["Savings Opportunity (%)"] = _colour_sav
-    if "Generation Flag" in view.columns:
-        style_cols["Generation Flag"] = _colour_gen
-
+    fmt_map = {c: _fmt_cell(c) for c in view.columns if ("Savings %" in c or "Cost ($)" in c)}
+    style_cols = {c: _style_sav for c in view.columns if "Savings %" in c}
     try:
-        styled = view.style.format(fmt_map, na_rep="N/A")
+        sty = view.style.format(fmt_map, na_rep="N/A")
         for col_name, fn in style_cols.items():
-            if col_name in view.columns:
-                styled = styled.applymap(fn, subset=[col_name])
-        styled = styled.set_properties(**{"font-size": "0.79rem"})
+            sty = sty.map(fn, subset=[col_name])
+        sty = sty.set_properties(**{"font-size": "0.8rem"})
     except Exception:
-        styled = view   # fallback: plain df if styling fails
+        sty = view
 
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        hide_index=True,
-        height=500,      # fixed height enables virtual scrolling (sticky header)
+    st.dataframe(sty, use_container_width=True, hide_index=True, height=480)
+
+    export_df = apply_na_fill(df_out)
+    reg_lbl = REGION_LABELS.get(st.session_state.get("region_id", DEFAULT_REGION), "")
+    st.download_button(
+        "Download Excel",
+        build_excel(export_df, reg_lbl),
+        "finops_recommendations.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.download_button(
+        "Download CSV",
+        export_df.to_csv(index=False).encode(),
+        "finops_recommendations.csv",
+        "text/csv",
     )
 
-    # ── Downloads ─────────────────────────────────────────────────────────
-    st.markdown("---")
-    d1, d2, _ = st.columns([2, 2, 5])
-    export_df = apply_na_fill(df_out)
-    region_label = REGION_LABELS.get(st.session_state.get("region_id", DEFAULT_REGION), "")
-
-    with d1:
-        xl = build_excel(export_df, region_label)
-        st.download_button(
-            "⬇ Download Excel (.xlsx)",
-            data=xl,
-            file_name="ec2_finops_recommendations.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    with d2:
-        csv_b = export_df.to_csv(index=False).encode()
-        st.download_button(
-            "⬇ Download CSV",
-            data=csv_b,
-            file_name="ec2_finops_recommendations.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-    # ── Savings chart ──────────────────────────────────────────────────────
-    st.markdown("---")
-    ch1, ch2 = st.columns(2)
-
-    with ch1:
-        st.markdown('<div class="sec">Avg Savings by Instance Family</div>',
-                    unsafe_allow_html=True)
-        chart_df = df_out.copy()
-        chart_df["_s"] = pd.to_numeric(
-            chart_df.get("Savings Opportunity (%)", pd.Series()), errors="coerce")
-        chart_df["Fam"] = chart_df["Instance Type"].apply(
-            lambda x: str(x).split(".")[0] if "." in str(x) else str(x))
-        grp = (chart_df.groupby("Fam")["_s"].mean()
-               .round(1).sort_values(ascending=False).dropna())
-        if not grp.empty:
-            st.bar_chart(grp.rename("Avg Savings (%)"), height=260,
-                         use_container_width=True)
-        else:
-            st.info("No savings data to chart.")
-
-    with ch2:
-        st.markdown('<div class="sec">Generation Distribution</div>',
-                    unsafe_allow_html=True)
-        if "Generation Flag" in df_out.columns:
-            gen_counts = df_out["Generation Flag"].value_counts()
-            order = ["Old Gen", "Current", "Latest", "N/A"]
-            gen_counts = gen_counts.reindex(
-                [o for o in order if o in gen_counts.index])
-            if not gen_counts.empty:
-                st.bar_chart(gen_counts.rename("Count"), height=260,
-                             use_container_width=True)
+elif lr is None:
+    st.info("Upload a file and click **Process** to load. Then map columns if prompted, **Run enrichment**.")
 
 else:
-    # ── Empty state ────────────────────────────────────────────────────────
-    st.markdown("""
-    <div style="text-align:center;padding:4rem 2rem;color:#9ca3af">
-      <div style="font-size:2.5rem;margin-bottom:.75rem">📤</div>
-      <div style="font-size:1rem;font-weight:500;color:#4b5563">
-        Upload an EC2 cost export and click <strong>Process</strong>
-      </div>
-      <div style="font-size:.81rem;margin-top:.4rem">
-        Works with AWS Cost Explorer, CUR exports, and custom billing spreadsheets<br>
-        Handles 10,000+ rows · Accepts messy column names · Never guesses prices
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    if not binding_ready:
+        st.info("Complete **column mapping** (and cost selection if needed), then **Run enrichment**.")
