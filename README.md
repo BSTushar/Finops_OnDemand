@@ -5,6 +5,38 @@ Release v1.4: workspace aligned with [Finops_OnDemand](https://github.com/BSTush
 
 ---
 
+## Disclaimer (mandatory for internal use)
+
+**Costs are based on a static AWS list-price snapshot (eu-west-1). Values are indicative and must be validated against actual billing before decision-making.**
+
+- **Pricing snapshot** (region id, source, as-of date) is shown in the app header and repeated on the **Recommendations** sheet (top rows) and **Metadata** sheet in Excel exports.
+- This tool is **decision support only**; it is **not** a replacement for billing systems (CUR, Cost Explorer, invoices). **Recommendations must be validated** by engineering and finance before production changes.
+
+---
+
+## What it does / does not do
+
+| Does | Does not |
+|------|----------|
+| Enrich uploads with indicative alt instance classes, costs, and savings % from a **local** price dataset | Call the AWS Pricing API or send your data externally |
+| Preserve original columns and insert enrichment **after** the instance column | Apply enterprise discounts, RIs, or Savings Plans automatically |
+| Show **N/A** when a SKU or OS is unknown | Guarantee performance or Graviton compatibility |
+
+**How to use:** Upload CSV/Excel → choose pricing **region** and **Service** (EC2 / RDS / Both) → map columns if needed → **Run enrichment** → filter → download **Excel** (includes disclaimer + metadata) or **CSV** (data table only).
+
+---
+
+## Interface (guided experience)
+
+The Streamlit UI is designed for a **calm, product-style flow** (clarity-first, similar in spirit to Apple’s marketing sites—generous whitespace, system typography, soft cards, no external font CDNs):
+
+- **Centered layout** (~1080px) with **numbered steps**: load file → optional merge → map columns → run enrichment → results.
+- **SF / system font stack** (`-apple-system`, `BlinkMacSystemFont`, `Segoe UI`, …), **antialiased** type, **pill** primary actions, **rounded** inputs and file dropzones.
+- **Light** theme by default in `config.toml` with **blue** primary accent; **dark mode** follows the OS (`prefers-color-scheme`) for backgrounds and cards.
+- **Trust card** surfaces pricing snapshot, disclaimer, and expectation-setting in one readable block.
+
+---
+
 ## Quick Start
 
 ### Local (Python)
@@ -42,40 +74,35 @@ open http://localhost:8501
 
 | Feature | Detail |
 |---|---|
+| **Guided UI** | Numbered steps, hero headline, trust card, pill buttons |
 | File upload | CSV, XLSX, XLS |
-| Auto column detection | 50+ column name aliases, case-insensitive |
-| **Failsafe manual mapping** | Dropdown UI when auto-detection fails |
-| Pricing | Verified AWS On-Demand prices, 4 regions |
-| Region dropdown | EU Ireland (default), US Virginia, AP Mumbai, EU Frankfurt |
-| Recommendations | Alt 1 (next-gen) + Alt 2 (latest/Graviton) |
-| Generation flag | Old Gen 🔴 / Current / Latest 🟢 |
-| Colour-coded table | Green ≥20%, Amber 5–20%, Red = Old Gen |
-| Sticky table header | Fixed height with scroll |
-| Search + 5 filters | Text search, region, family, savings tier, generation |
-| KPI tiles | Total, Optimisable, Old Gen count, Avg/Max savings, Est. saving |
-| Charts | Savings by family · Generation distribution |
-| Export | Formatted Excel (.xlsx) + CSV |
-| Scale | 10,000+ rows · ~24,000 rows/sec |
-| Zero network calls | Pricing from verified local cache |
-| Docker-ready | Single-container deployment |
+| **Fix Your Sheet** | Optional merge of two files on a common ID (`sheet_merger.py`) |
+| Auto column detection | Broad header hints; manual mapping when ambiguous |
+| Pricing | Local static lists, 4 regions (no live Pricing API) |
+| Service modes | EC2-only, RDS-only, or both |
+| CPU modes | Default, Intel, Graviton, or both |
+| Recommendations | Alt1 / Alt2 instance API names + projected costs & savings % |
+| Table | Colour hints on savings columns; scrollable frame |
+| Filters | View EC2/RDS subset, OS text filter, column search |
+| KPI tiles | Row count, avg / max Alt1 savings, actual-cost flag |
+| Export | Excel (disclaimer + metadata rows) + CSV (table only) |
+| Scale | Tested 10k+ rows |
+| Security posture | App pricing logic uses **local** datasets only (no `requests`/`urllib` in tool `.py`) |
 
 ---
 
-## Output Column Order (guaranteed)
+## Output columns (after enrichment)
 
-| # | Column | Description |
-|---|---|---|
-| 1 | Instance Type | Original value |
-| 2 | OS | Original value |
-| 3 | On-Demand Price ($) | Verified AWS price ($/hr) |
-| 4 | Alt 1 Instance | Next-generation upgrade |
-| 5 | Alt 1 Price ($) | Alt 1 price ($/hr) |
-| 6 | Alt 2 Instance | Latest/Graviton upgrade |
-| 7 | Alt 2 Price ($) | Alt 2 price ($/hr) |
-| 8 | Size | Extracted size (large, xlarge…) |
-| 9 | Savings Opportunity (%) | (Original − Alt1) / Original × 100 |
-| 10 | Generation Flag | Old Gen / Current / Latest / N/A |
-| 11+ | All original columns | Preserved unchanged |
+New columns are inserted **immediately after** your mapped **instance** column (original columns otherwise **unchanged**):
+
+| Column | Meaning |
+|---|---|
+| `Actual Cost ($)` | From your file (optional column) |
+| `Alt1 Instance` / `Alt2 Instance` | Suggested API names |
+| `Alt1 Cost ($)` / `Alt2 Cost ($)` | Indicative, from list-price ratio × actual |
+| `Alt1 Savings %` / `Alt2 Savings %` | vs actual, or “No Savings” / `N/A` |
+
+All **original** columns remain, in order, before/after that block.
 
 ---
 
@@ -115,15 +142,19 @@ If columns cannot be auto-detected → manual mapping UI appears.
 
 ```
 finops_tool/
-├── app.py              # Streamlit UI (685 lines)
-├── data_loader.py      # File ingestion + failsafe column mapping
-├── processor.py        # Enrichment pipeline + generation flagging
-├── recommender.py      # Instance upgrade path logic (40+ families)
-├── pricing_engine.py   # Verified AWS prices for 4 regions (230+ types)
-├── requirements.txt    # Python dependencies
-├── Dockerfile          # Production Docker image
-├── .streamlit/
-│   └── config.toml     # Streamlit server configuration
+├── app.py              # Streamlit UI
+├── excel_export.py     # Excel download (disclaimer + metadata rows)
+├── sheet_merger.py     # Fix Your Sheet: merge two uploads on a common key
+├── data_loader.py      # File ingestion + column mapping
+├── processor.py        # Enrichment pipeline
+├── recommender.py      # Instance upgrade path logic
+├── rds_recommender.py  # RDS API Name recommendations
+├── pricing_engine.py   # Local price datasets + disclaimer constants
+├── instance_api.py     # Strict API Name parsing
+├── requirements.txt
+├── Dockerfile
+├── tests/
+├── .streamlit/config.toml
 └── README.md
 ```
 

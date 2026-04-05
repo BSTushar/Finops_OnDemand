@@ -202,6 +202,26 @@ def load_file(file_obj: BinaryIO, filename: str) -> LoadResult:
         raise ValueError('All rows are empty after stripping blank lines.')
     return analyze_load(df, [])
 
+def dataframe_from_bytes(raw_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Parse upload bytes to a cleaned DataFrame (no column analysis). For Fix Your Sheet merge."""
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    try:
+        df = _parse_dataframe(raw_bytes, ext)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"Failed to read file '{filename}': {exc}") from exc
+    if df.empty:
+        raise ValueError('The uploaded file contains no data rows.')
+    df = df.copy()
+    df.replace('', pd.NA, inplace=True)
+    df.dropna(how='all', inplace=True)
+    df.dropna(axis=1, how='all', inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    if df.empty:
+        raise ValueError('All rows are empty after stripping blank lines.')
+    return df
+
 def finalize_binding(lr: LoadResult, instance_col: str, os_col: str, actual_cost_col: str | None) -> LoadResult:
     if instance_col not in lr.df.columns or os_col not in lr.df.columns:
         raise ValueError('Selected column not found in file.')

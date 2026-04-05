@@ -2,14 +2,266 @@ from __future__ import annotations
 import logging
 import pandas as pd
 import streamlit as st
-from data_loader import LoadResult, finalize_binding, load_file
+from data_loader import LoadResult, analyze_load, dataframe_from_bytes, finalize_binding, load_file
 from excel_export import build_excel, savings_numeric
 from processor import apply_na_fill, process
-from pricing_engine import DEFAULT_REGION, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale
+from pricing_engine import COST_DISCLAIMER_TEXT, DECISION_SUPPORT_NOTE, DEFAULT_REGION, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale, format_pricing_snapshot_line
+from sheet_merger import merge_primary_with_secondary, suggest_key_pairs
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger(__name__)
-st.set_page_config(page_title='FinOps Optimizer', page_icon='💰', layout='wide', initial_sidebar_state='collapsed')
-st.markdown('\n<style>\n:root {\n  --fin-bg: #f4f5f7;\n  --fin-card: #ffffff;\n  --fin-text: #1a1d23;\n  --fin-muted: #6b7280;\n  --fin-border: #e2e5eb;\n  --fin-green: #00955c;\n  --fin-amber: #d97706;\n  --fin-red: #dc2626;\n  --fin-header-fg: #f0f2f5;\n  --fin-header-bg: #1a1d23;\n}\n@media (prefers-color-scheme: dark) {\n  :root {\n    --fin-bg: #0e1117;\n    --fin-card: #1e2128;\n    --fin-text: #f3f4f6;\n    --fin-muted: #9ca3af;\n    --fin-border: #374151;\n    --fin-header-fg: #f9fafb;\n    --fin-header-bg: #111827;\n  }\n}\nhtml, body {\n  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;\n}\n.stApp {\n  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;\n}\n@media (prefers-color-scheme: dark) {\n  .metric { background: var(--fin-card); border-color: var(--fin-border); }\n  .metric-label { color: var(--fin-muted); }\n  .metric-value { color: var(--fin-text); }\n}\n.hdr {\n  background: var(--fin-header-bg);\n  color: var(--fin-header-fg);\n  padding: 1.2rem 1.5rem;\n  border-radius: 8px;\n  margin-bottom: 1rem;\n}\n.hdr h1 { margin: 0; font-size: 1.35rem; font-weight: 600; }\n.hdr p { margin: 0.35rem 0 0; font-size: 0.8rem; opacity: 0.85; }\n.sec { font-size: 0.7rem; font-weight: 600; color: var(--fin-muted);\n       letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.35rem; }\n.metric-row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }\n.metric {\n  flex: 1 1 120px;\n  background: var(--fin-card);\n  border: 1px solid var(--fin-border);\n  border-radius: 8px;\n  padding: 0.85rem 1rem;\n}\n.metric-label { font-size: 0.65rem; font-weight: 600; color: var(--fin-muted); }\n.metric-value { font-size: 1.35rem; font-weight: 600; color: var(--fin-text); margin-top: 0.15rem; }\n.box-ok, .box-warn, .box-err {\n  padding: 0.65rem 1rem;\n  border-radius: 0 6px 6px 0;\n  font-size: 0.82rem;\n  margin: 0.4rem 0;\n}\n.box-ok { background: rgba(34, 197, 94, 0.12); border-left: 3px solid #22c55e; color: var(--fin-text); }\n.box-warn { background: rgba(245, 158, 11, 0.12); border-left: 3px solid #f59e0b; color: var(--fin-text); }\n.box-err { background: rgba(239, 68, 68, 0.12); border-left: 3px solid #ef4444; color: var(--fin-text); }\n#MainMenu, footer { visibility: hidden; }\n.block-container { padding-top: 1rem; max-width: 1480px; }\n[data-testid="stDataFrame"] { max-height: 520px; overflow: auto !important; }\n</style>\n', unsafe_allow_html=True)
+st.set_page_config(page_title='FinOps Optimizer', page_icon='◆', layout='wide', initial_sidebar_state='collapsed')
+APPLE_UI_CSS = """
+<style>
+:root {
+  --apple-blue: #0071e3;
+  --apple-blue-hover: #0077ed;
+  --apple-text: #1d1d1f;
+  --apple-text2: #6e6e73;
+  --apple-bg: #f5f5f7;
+  --apple-card: #ffffff;
+  --apple-line: rgba(0,0,0,0.08);
+  --apple-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  --apple-radius: 18px;
+  --apple-radius-sm: 12px;
+  --fin-green: #34c759;
+  --fin-amber: #ff9f0a;
+  --fin-red: #ff3b30;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --apple-text: #f5f5f7;
+    --apple-text2: #a1a1a6;
+    --apple-bg: #000000;
+    --apple-card: #1c1c1e;
+    --apple-line: rgba(255,255,255,0.12);
+    --apple-shadow: 0 8px 40px rgba(0,0,0,0.45);
+  }
+}
+html, body, .stApp, [data-testid="stAppViewContainer"] {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+.stApp {
+  background: var(--apple-bg) !important;
+  color: var(--apple-text) !important;
+}
+.block-container {
+  padding-top: 2.5rem !important;
+  padding-bottom: 4rem !important;
+  max-width: 1080px !important;
+}
+#MainMenu, footer { visibility: hidden; }
+hr {
+  margin: 2rem 0 !important;
+  border: none !important;
+  height: 1px !important;
+  background: var(--apple-line) !important;
+}
+/* Hero */
+.apple-hero {
+  text-align: center;
+  padding: 2.5rem 1rem 2rem;
+  margin-bottom: 0.5rem;
+}
+.apple-eyebrow {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--apple-text2);
+  margin: 0 0 0.75rem;
+}
+.apple-headline {
+  font-size: clamp(2rem, 5vw, 2.75rem);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: var(--apple-text);
+  margin: 0 0 0.5rem;
+}
+.apple-tagline {
+  font-size: 1.125rem;
+  font-weight: 400;
+  color: var(--apple-text2);
+  margin: 0 0 1.25rem;
+  line-height: 1.45;
+  max-width: 36rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+.apple-pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--apple-text2);
+  background: var(--apple-card);
+  border: 1px solid var(--apple-line);
+  padding: 0.35rem 0.85rem;
+  border-radius: 100px;
+  box-shadow: var(--apple-shadow);
+}
+/* Guided steps */
+.flow-step-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  margin: 2.25rem 0 1rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--apple-line);
+}
+.flow-num {
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--apple-blue);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.flow-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--apple-text);
+  margin: 0;
+}
+.flow-sub {
+  font-size: 0.9rem;
+  color: var(--apple-text2);
+  margin: 0.35rem 0 0;
+  line-height: 1.4;
+}
+/* Trust / disclaimer card */
+.trust-card {
+  background: var(--apple-card);
+  border: 1px solid var(--apple-line);
+  border-radius: var(--apple-radius);
+  padding: 1.5rem 1.75rem;
+  margin: 1.5rem 0 0.5rem;
+  box-shadow: var(--apple-shadow);
+}
+.trust-card .snap { font-size: 0.9rem; font-weight: 600; color: var(--apple-text); margin: 0 0 0.65rem; }
+.trust-card .legal { font-size: 0.8125rem; color: var(--apple-text2); line-height: 1.55; margin: 0.4rem 0 0; }
+.trust-card code { font-size: 0.8em; padding: 0.1em 0.35em; border-radius: 4px; background: var(--apple-bg); }
+/* Section label */
+.sec {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--apple-text2);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0 0 0.5rem;
+}
+/* KPI metrics */
+.metric {
+  background: var(--apple-card) !important;
+  border: 1px solid var(--apple-line) !important;
+  border-radius: var(--apple-radius-sm) !important;
+  padding: 1rem 1.15rem !important;
+  box-shadow: var(--apple-shadow);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.metric:hover { transform: translateY(-1px); }
+.metric-label { font-size: 0.68rem !important; font-weight: 600 !important; color: var(--apple-text2) !important; letter-spacing: 0.04em; text-transform: uppercase; }
+.metric-value { font-size: 1.35rem !important; font-weight: 600 !important; color: var(--apple-text) !important; margin-top: 0.25rem !important; }
+/* Alerts */
+.box-ok, .box-warn, .box-err {
+  padding: 0.85rem 1.1rem;
+  border-radius: var(--apple-radius-sm);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  margin: 0.5rem 0;
+  border: 1px solid var(--apple-line);
+}
+.box-ok { background: rgba(52, 199, 89, 0.1); border-color: rgba(52, 199, 89, 0.25); color: var(--apple-text); }
+.box-warn { background: rgba(255, 159, 10, 0.1); border-color: rgba(255, 159, 10, 0.3); color: var(--apple-text); }
+.box-err { background: rgba(255, 59, 48, 0.08); border-color: rgba(255, 59, 48, 0.25); color: var(--apple-text); }
+/* Primary controls row breathing room */
+[data-testid="stHorizontalBlock"] {
+  gap: 0.75rem;
+}
+/* Buttons */
+div.stButton > button {
+  border-radius: 100px !important;
+  font-weight: 500 !important;
+  padding: 0.55rem 1.25rem !important;
+  transition: background 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease !important;
+  border: none !important;
+}
+div.stButton > button[kind="primary"] {
+  background: var(--apple-blue) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 12px rgba(0, 113, 227, 0.35) !important;
+}
+div.stButton > button[kind="primary"]:hover {
+  background: var(--apple-blue-hover) !important;
+  box-shadow: 0 4px 16px rgba(0, 113, 227, 0.4) !important;
+}
+div.stButton > button[kind="secondary"] {
+  background: var(--apple-card) !important;
+  color: var(--apple-text) !important;
+  border: 1px solid var(--apple-line) !important;
+}
+/* Inputs */
+.stSelectbox [data-baseweb="select"] > div, .stTextInput input, [data-baseweb="input"] {
+  border-radius: 10px !important;
+}
+[data-testid="stFileUploader"] section {
+  border-radius: var(--apple-radius-sm) !important;
+  border: 2px dashed var(--apple-line) !important;
+  background: var(--apple-card) !important;
+  padding: 1rem !important;
+  transition: border-color 0.2s ease, background 0.2s ease !important;
+}
+[data-testid="stFileUploader"] section:hover {
+  border-color: var(--apple-blue) !important;
+}
+/* Expander */
+.streamlit-expanderHeader {
+  font-weight: 500 !important;
+  border-radius: var(--apple-radius-sm) !important;
+}
+[data-testid="stExpander"] {
+  border: 1px solid var(--apple-line) !important;
+  border-radius: var(--apple-radius) !important;
+  overflow: hidden;
+  background: var(--apple-card) !important;
+  box-shadow: var(--apple-shadow);
+}
+/* Dataframe */
+[data-testid="stDataFrame"] {
+  max-height: 520px !important;
+  overflow: auto !important;
+  border-radius: var(--apple-radius-sm) !important;
+  border: 1px solid var(--apple-line) !important;
+}
+/* Radio horizontal */
+[data-testid="stHorizontalBlock"] [data-baseweb="radio"] label {
+  font-size: 0.875rem !important;
+}
+/* Caption */
+.stCaption, [data-testid="stCaptionContainer"] {
+  color: var(--apple-text2) !important;
+  font-size: 0.8125rem !important;
+}
+/* Info blocks */
+.stAlert {
+  border-radius: var(--apple-radius-sm) !important;
+}
+</style>
+"""
+st.markdown(APPLE_UI_CSS, unsafe_allow_html=True)
+
+
+def _flow_step(num: int, title: str, subtitle: str='') -> None:
+    sub = f'<p class="flow-sub">{subtitle}</p>' if subtitle else ''
+    st.markdown(f'<div class="flow-step-head"><span class="flow-num">{num}</span><div><p class="flow-title">{title}</p>{sub}</div></div>', unsafe_allow_html=True)
 
 def _savings_for_kpi(v) -> float | None:
     if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -39,12 +291,19 @@ for (key, default) in (('load_result', None), ('result', None), ('region_id', DE
     if key not in st.session_state:
         st.session_state[key] = default
 stale = cache_is_stale()
-pill = f'Cache {cache_age_days()}d — refresh due' if stale else 'Cache fresh'
-st.markdown(f'\n<div class="hdr">\n  <h1>💰 FinOps Optimizer <span style="opacity:0.85;font-size:0.75rem">({pill})</span></h1>\n  <p>EC2 & RDS · Actual-cost savings · Local pricing only · Original columns preserved</p>\n  <p style="margin-top:0.5rem;font-size:0.75rem;opacity:0.9">Map the column that holds the AWS <strong>API Name</strong> (e.g. <code>m5.large</code>, <code>db.r5.xlarge</code>). List prices are looked up locally; if an API name is not in the cache for the selected region, cost and savings show as N/A — not guessed.</p>\n</div>\n', unsafe_allow_html=True)
+pill = f'Dataset {cache_age_days()}d old — consider refresh' if stale else 'List prices loaded locally'
+st.markdown(f'''<div class="apple-hero">
+<p class="apple-eyebrow">Decision support · EC2 &amp; RDS</p>
+<h1 class="apple-headline">FinOps Optimizer</h1>
+<p class="apple-tagline">Upload your export, map columns once, and see indicative savings from a static AWS list-price snapshot—before you commit to changes.</p>
+<span class="apple-pill">{pill}</span>
+</div>''', unsafe_allow_html=True)
+_flow_step(1, 'Bring your file', 'CSV or Excel. Your columns stay in order; we only add enrichment after the instance column.')
 (up_col, reg_col, svc_col, cpu_col, go_col) = st.columns([3, 2, 1, 1, 1])
 with up_col:
-    uploaded = st.file_uploader('file', type=['csv', 'xlsx', 'xls'], label_visibility='collapsed')
-    st.caption('Upload CSV / Excel — all columns kept in order. Use the column with AWS API Name for instance/DB class.')
+    st.markdown('<div class="sec">File</div>', unsafe_allow_html=True)
+    uploaded = st.file_uploader('Drop your spreadsheet', type=['csv', 'xlsx', 'xls'], label_visibility='visible')
+    st.caption('Include the column with AWS API Names (e.g. m5.large, db.r5.xlarge).')
 with reg_col:
     st.markdown('<div class="sec">Pricing region</div>', unsafe_allow_html=True)
     region_opts = [f'{label}  [{rid}]' for (rid, label) in SUPPORTED_REGIONS]
@@ -59,12 +318,97 @@ with cpu_col:
     st.markdown('<div class="sec">CPU</div>', unsafe_allow_html=True)
     st.session_state['cpu_filter'] = st.selectbox('cpu', ['both', 'default', 'intel', 'graviton'], format_func=lambda x: {'both': 'Both', 'default': 'Default', 'intel': 'Intel', 'graviton': 'Graviton'}[x], label_visibility='collapsed')
 with go_col:
-    st.markdown('<br>', unsafe_allow_html=True)
-    run = st.button('Process', type='primary', disabled=uploaded is None, use_container_width=True)
-st.markdown('---')
+    st.markdown('<div class="sec">&nbsp;</div>', unsafe_allow_html=True)
+    run = st.button('Continue', type='primary', disabled=uploaded is None, use_container_width=True)
+_snapshot_ui = format_pricing_snapshot_line(st.session_state.get('region_id', DEFAULT_REGION))
+st.markdown(f'''<div class="trust-card">
+<p class="snap">{_snapshot_ui}</p>
+<p class="legal">{COST_DISCLAIMER_TEXT}</p>
+<p class="legal">{DECISION_SUPPORT_NOTE}</p>
+<p class="legal">Indicative savings only. Original columns preserved. Unknown API names or SKUs show <strong>N/A</strong>—never a guess.</p>
+</div>''', unsafe_allow_html=True)
+with st.expander('How it works · Limitations', expanded=False):
+    st.markdown(
+        """
+**What this tool does**
+- Enriches your uploaded spreadsheet with **Actual Cost** (from your file), **recommended instance classes** (Alt1 / Alt2), **indicative alt costs**, and **savings %** using **static AWS on-demand list prices** from a **local dataset** (no live AWS Pricing API calls).
+- Supports **EC2** and **RDS** API names (`m5.large`, `db.r5.xlarge`, …) and **Service** mode (EC2-only, RDS-only, or both).
+
+**What it does not do**
+- It does **not** replace **AWS Billing**, **Cost Explorer**, or **CUR**; it does **not** apply your enterprise discounts, Reserved Instances, or Savings Plans.
+- It does **not** prove performance or compatibility (especially **Graviton**); engineering must validate before production changes.
+
+**How to use it**
+1. Upload CSV or Excel (all original columns stay in order).  
+2. Choose **Pricing region** (default Ireland `eu-west-1`).  
+3. Pick **Service** (EC2 / RDS / Both) and **CPU** mode for enrichment.  
+4. Map **instance** and **OS** columns if prompted; choose **cost** column if needed.  
+5. **Run enrichment**, then filter, export **Excel** (includes disclaimer + pricing metadata) or **CSV** (table only).
+
+**Limitations**
+- Values are **indicative**; validate against **actual invoices** before decisions.  
+- Many **RDS** SKUs may be missing from the local table → **N/A**.  
+- Pricing snapshot **as-of** date is shown above and in the Excel **Metadata** sheet.
+
+**Fix Your Sheet (optional)**  
+Merge two uploads (e.g. inventory + cost extract) on a common ID **before** enrichment. Dataset 1 is primary: its columns and order are kept; only **new** columns from Dataset 2 are appended, with values filled where D1 cells are empty.
+"""
+    )
+_flow_step(2, 'Fix Your Sheet (optional)', 'Two files—inventory plus cost extract? Merge on a shared ID. Primary file keeps its column order; we only append new columns from the second file.')
+st.caption('Dataset 1 = primary row layout. Dataset 2 = extra fields (e.g. spend). Match on resource ID, instance ID, or similar.')
+(fx1, fx2) = st.columns(2)
+with fx1:
+    st.markdown('<div class="sec">Dataset 1 · Primary</div>', unsafe_allow_html=True)
+    fix_u1 = st.file_uploader('Primary spreadsheet', type=['csv', 'xlsx', 'xls'], key='fix_sheet_d1')
+with fx2:
+    st.markdown('<div class="sec">Dataset 2 · Supplement</div>', unsafe_allow_html=True)
+    fix_u2 = st.file_uploader('Supplement spreadsheet', type=['csv', 'xlsx', 'xls'], key='fix_sheet_d2')
+if fix_u1 and fix_u2:
+    try:
+        fix_d1 = dataframe_from_bytes(fix_u1.getvalue(), fix_u1.name)
+        fix_d2 = dataframe_from_bytes(fix_u2.getvalue(), fix_u2.name)
+    except ValueError as fve:
+        st.markdown(f'<div class="box-err">❌ Fix Your Sheet: {fve}</div>', unsafe_allow_html=True)
+        fix_d1 = None
+        fix_d2 = None
+    if fix_d1 is not None and fix_d2 is not None:
+        _pairs = suggest_key_pairs(list(fix_d1.columns), list(fix_d2.columns))
+        _def = _pairs[0] if _pairs else (str(fix_d1.columns[0]), str(fix_d2.columns[0]))
+        _i1 = list(fix_d1.columns).index(_def[0]) if _def[0] in fix_d1.columns else 0
+        _i2 = list(fix_d2.columns).index(_def[1]) if _def[1] in fix_d2.columns else 0
+        fix_k1 = st.selectbox('Merge key — Dataset 1 (primary)', list(fix_d1.columns), index=min(_i1, len(fix_d1.columns) - 1), key='fix_sheet_key_d1')
+        fix_k2 = st.selectbox('Merge key — Dataset 2', list(fix_d2.columns), index=min(_i2, len(fix_d2.columns) - 1), key='fix_sheet_key_d2')
+        if st.button('Merge sheets', key='fix_sheet_merge'):
+            try:
+                (fix_merged, fix_mw) = merge_primary_with_secondary(fix_d1, fix_d2, fix_k1, fix_k2)
+                st.session_state['fix_merged_df'] = fix_merged
+                st.session_state['fix_merge_warnings'] = fix_mw
+            except ValueError as mve:
+                st.markdown(f'<div class="box-err">❌ {mve}</div>', unsafe_allow_html=True)
+_fix_mdf = st.session_state.get('fix_merged_df')
+if _fix_mdf is not None:
+    st.markdown(f'<div class="box-ok">✅ Merged preview: **{len(_fix_mdf):,}** rows × **{len(_fix_mdf.columns)}** columns</div>', unsafe_allow_html=True)
+    for _fw in st.session_state.get('fix_merge_warnings', []):
+        st.markdown(f'<div class="box-warn">⚠️ {_fw}</div>', unsafe_allow_html=True)
+    st.dataframe(_fix_mdf.head(40), use_container_width=True, hide_index=True, height=360)
+    if st.button('Use merged data', type='primary', key='fix_sheet_apply'):
+        _mw = st.session_state.get('fix_merge_warnings', [])
+        _bw = ['Dataset prepared with Fix Your Sheet (two files merged on key).'] + list(_mw)
+        st.session_state['load_result'] = analyze_load(_fix_mdf, _bw)
+        st.session_state['result'] = None
+        st.session_state['binding'] = None
+        st.session_state['cost_pick'] = None
+        st.session_state.pop('_enrich_svc', None)
+        st.session_state.pop('_enrich_cpu', None)
+        st.session_state.pop('fix_merged_df', None)
+        st.session_state.pop('fix_merge_warnings', None)
+        st.rerun()
+st.markdown('<hr/>', unsafe_allow_html=True)
 if run and uploaded:
     with st.spinner('Loading…'):
         try:
+            st.session_state.pop('fix_merged_df', None)
+            st.session_state.pop('fix_merge_warnings', None)
             lr: LoadResult = load_file(uploaded, uploaded.name)
             st.session_state['load_result'] = lr
             st.session_state['result'] = None
@@ -90,7 +434,7 @@ if st.session_state.get('binding') is not None:
 if lr is not None and (not binding_ready):
     cols_all = list(lr.df.columns)
     if lr.needs_instance_pick or lr.needs_os_pick:
-        st.markdown('<div class="sec">Column mapping (required)</div>', unsafe_allow_html=True)
+        _flow_step(3, 'Map columns', 'Tell us which columns hold the instance API name and OS (or engine).')
         (mc1, mc2) = st.columns(2)
         with mc1:
             di = 0
@@ -111,7 +455,7 @@ if lr is not None and (not binding_ready):
             cost_sel = st.selectbox('Actual cost column (optional)', ['— None —'] + cols_all, key='cost_optional')
             if cost_sel == '— None —':
                 cost_sel = None
-        if st.button('Apply column mapping', type='primary'):
+        if st.button('Save mapping', type='primary'):
             try:
                 b = finalize_binding(lr, inst_sel, os_sel, cost_sel).binding
                 st.session_state['binding'] = b
@@ -133,6 +477,7 @@ if lr is not None and st.session_state.get('binding') is not None:
     chosen_binding = st.session_state['binding']
     binding_ready = True
     if st.session_state.get('result') is None:
+        _flow_step(4, 'Run enrichment', 'Applies list prices for the region you chose and fills Alt instance, costs, and savings.')
         if st.button('Run enrichment', type='primary', key='run_enrich'):
             try:
                 svc = st.session_state['service']
@@ -151,7 +496,7 @@ df_out: pd.DataFrame | None = st.session_state.get('result')
 if df_out is not None:
     if st.session_state.get('_enrich_svc') != st.session_state.get('service') or st.session_state.get('_enrich_cpu') != st.session_state.get('cpu_filter'):
         st.warning('Service or CPU mode changed since last enrichment — click **Run enrichment** to refresh.')
-    st.markdown('<div class="sec">Filter bar</div>', unsafe_allow_html=True)
+    st.markdown('<div class="flow-step-head" style="margin-top:1.5rem;border-bottom:none;"><span class="flow-num" style="background:#34c759;">5</span><div><p class="flow-title">Results</p><p class="flow-sub">Filter, search, then download Excel or CSV.</p></div></div>', unsafe_allow_html=True)
     (f1, f2, f3, f4) = st.columns([1, 1, 1, 3])
     with f1:
         vf_svc = st.radio('View service', ['all', 'ec2', 'rds'], format_func=lambda x: {'all': 'Both (show all)', 'ec2': 'EC2 rows only', 'rds': 'RDS rows only'}[x], horizontal=True)
@@ -183,12 +528,12 @@ if df_out is not None:
     def _style_sav(v: str) -> str:
         n = savings_numeric(v)
         if n is None:
-            return 'color: #9ca3af'
+            return 'color: #86868b'
         if n >= 20:
-            return 'color: #22c55e; font-weight:700'
+            return 'color: #34c759; font-weight:600'
         if n > 0:
-            return 'color: #d97706; font-weight:600'
-        return 'color: #dc2626; font-weight:600'
+            return 'color: #ff9f0a; font-weight:600'
+        return 'color: #ff3b30; font-weight:600'
 
     def _fmt_cell(cname: str):
 
@@ -217,10 +562,14 @@ if df_out is not None:
         sty = view
     st.dataframe(sty, use_container_width=True, hide_index=True, height=480)
     export_df = apply_na_fill(df_out)
-    reg_lbl = REGION_LABELS.get(st.session_state.get('region_id', DEFAULT_REGION), '')
-    st.download_button('Download Excel', build_excel(export_df, reg_lbl), 'finops_recommendations.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    st.download_button('Download CSV', export_df.to_csv(index=False).encode(), 'finops_recommendations.csv', 'text/csv')
+    reg_id = st.session_state.get('region_id', DEFAULT_REGION)
+    reg_lbl = REGION_LABELS.get(reg_id, '')
+    (dx1, dx2) = st.columns(2)
+    with dx1:
+        st.download_button('Download Excel', build_excel(export_df, reg_lbl, reg_id), 'finops_recommendations.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
+    with dx2:
+        st.download_button('Download CSV', export_df.to_csv(index=False).encode(), 'finops_recommendations.csv', 'text/csv', use_container_width=True)
 elif lr is None:
-    st.info('Upload a file and click **Process** to load. Then map columns if prompted, **Run enrichment**.')
+    st.markdown('<div class="trust-card"><p class="snap" style="margin:0;">Ready when you are</p><p class="legal" style="margin:0.5rem 0 0;">Upload a file above and tap <strong>Continue</strong>. We’ll guide you through mapping and enrichment.</p></div>', unsafe_allow_html=True)
 elif not binding_ready:
-    st.info('Complete **column mapping** (and cost selection if needed), then **Run enrichment**.')
+    st.markdown('<div class="trust-card"><p class="snap" style="margin:0;">Almost there</p><p class="legal" style="margin:0.5rem 0 0;">Finish column mapping (and cost column if asked), then run enrichment.</p></div>', unsafe_allow_html=True)

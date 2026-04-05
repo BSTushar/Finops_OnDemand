@@ -7,7 +7,7 @@ from openpyxl import load_workbook
 
 from data_loader import ColumnBinding, analyze_load, finalize_binding
 from instance_api import canonicalize_instance_api_name
-from pricing_engine import DEFAULT_REGION, PRICE_CACHE, get_price, get_rds_hourly
+from pricing_engine import COST_DISCLAIMER_TEXT, DEFAULT_REGION, PRICE_CACHE, get_price, get_rds_hourly
 from processor import INSERT_COLS, apply_na_fill, process
 from rds_mysql_sa_prices import RDS_MYSQL_SA_HOURLY
 from rds_recommender import get_rds_recommendations
@@ -175,12 +175,61 @@ class TestExcelExportShape(unittest.TestCase):
         df = pd.DataFrame({'A': [1], 'Instance': ['m5.large'], 'B': [2], 'OS': ['linux'], 'Cost': [50.0]})
         b = ColumnBinding(instance='Instance', os='OS', actual_cost='Cost')
         proc = apply_na_fill(process(df, b, region='eu-west-1'))
-        bio = io.BytesIO(build_excel(proc, 'EU (Ireland)'))
+        bio = io.BytesIO(build_excel(proc, 'EU (Ireland)', 'eu-west-1'))
         bio.seek(0)
         wb = load_workbook(bio, read_only=True)
         ws = wb.active
-        headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        a1 = ws['A1'].value
+        self.assertIsNotNone(a1)
+        self.assertIn('static AWS list-price snapshot', str(a1))
+        self.assertEqual(str(a1).strip(), COST_DISCLAIMER_TEXT)
+        snap = ws['A2'].value
+        self.assertIn('Pricing Snapshot:', str(snap))
+        self.assertIn('eu-west-1', str(snap))
+        hdr_row = 5
+        headers = [ws.cell(row=hdr_row, column=j).value for j in range(1, len(proc.columns) + 1)]
         self.assertEqual(headers, list(proc.columns))
+
+
+class TestPreshipServiceSmoke(unittest.TestCase):
+    """EC2 / RDS / both enrichment: no crash, column placement, savings shape."""
+
+    def setUp(self):
+        self.df = pd.DataFrame(
+            {
+                'Instance': ['m5.large', 'db.r5.large'],
+                'OS': ['linux', 'linux'],
+                'Cost': [100.0, 200.0],
+            }
+        )
+        self.b = ColumnBinding(instance='Instance', os='OS', actual_cost='Cost')
+
+    def test_ec2_mode(self):
+        out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='ec2', cpu_filter='both'))
+        self.assertEqual(list(out.columns[:5]), ['Instance', 'Actual Cost ($)', 'Alt1 Instance', 'Alt1 Cost ($)', 'Alt1 Savings %'])
+        self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+        self.assertEqual(out['Alt1 Instance'].iloc[1], 'N/A')
+
+    def test_rds_mode(self):
+        out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='rds', cpu_filter='both'))
+        self.assertEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+        self.assertNotEqual(out['Alt1 Instance'].iloc[1], 'N/A')
+
+    def test_both_mode(self):
+        out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='both', cpu_filter='both'))
+        self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+        self.assertNotEqual(out['Alt1 Instance'].iloc[1], 'N/A')
+
+    def test_excel_matches_ui_column_order(self):
+        from excel_export import build_excel
+
+        out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='both'))
+        bio = io.BytesIO(build_excel(out, 'EU (Ireland)', 'eu-west-1'))
+        bio.seek(0)
+        wb = load_workbook(bio, read_only=True)
+        ws = wb.active
+        hdr = [ws.cell(row=5, column=j).value for j in range(1, len(out.columns) + 1)]
+        self.assertEqual(hdr, list(out.columns))
 
 
 class TestPerformance10k(unittest.TestCase):
