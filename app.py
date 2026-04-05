@@ -380,6 +380,48 @@ div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid
 .finops-page-footer-sep { margin: 0 0.45rem; opacity: 0.4; }
 .finops-page-footer-team { font-weight: 500; color: color-mix(in srgb, var(--st-text-color) 85%, var(--st-background-color)); }
 
+.finops-journey {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem 0.65rem;
+  margin: 0 auto 1.25rem;
+  padding: 0.65rem 1rem;
+  max-width: 44rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  text-align: center;
+  color: color-mix(in srgb, var(--st-text-color) 88%, var(--st-background-color));
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--st-border-color) 65%, transparent);
+  background: color-mix(in srgb, var(--st-secondary-background-color) 88%, var(--st-background-color));
+}
+.finops-journey strong {
+  color: var(--st-text-color);
+  font-weight: 700;
+}
+.finops-journey-sep {
+  opacity: 0.45;
+  user-select: none;
+}
+.finops-journey-note {
+  display: block;
+  width: 100%;
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  opacity: 0.85;
+  color: color-mix(in srgb, var(--st-text-color) 72%, var(--st-background-color));
+}
+.finops-trust-preface {
+  font-size: 0.75rem;
+  line-height: 1.45;
+  margin: 0 0 0.75rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--st-primary-color) 8%, var(--st-secondary-background-color));
+  color: color-mix(in srgb, var(--st-text-color) 88%, var(--st-background-color));
+}
 .finops-flow-step {
   display: flex;
   align-items: flex-start;
@@ -388,6 +430,24 @@ div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid
   padding-bottom: 0.35rem;
   border-bottom: 1px solid color-mix(in srgb, var(--st-border-color, #88888835) 100%, transparent);
   animation: finops-fade-up 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.finops-flow-step--optional {
+  border-bottom-style: dashed;
+  opacity: 0.97;
+}
+.finops-flow-badge-opt {
+  flex-shrink: 0;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.4rem 0.55rem;
+  border-radius: 8px;
+  line-height: 1.2;
+  margin-top: 0.12rem;
+  background: color-mix(in srgb, var(--st-secondary-background-color) 82%, var(--st-primary-color));
+  color: var(--st-text-color);
+  border: 1px solid color-mix(in srgb, var(--st-border-color) 65%, transparent);
 }
 .finops-flow-num {
   flex-shrink: 0;
@@ -520,6 +580,9 @@ div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid
   border-color: color-mix(in srgb, var(--st-red-color, #ff3b30) 26%, var(--st-border-color, transparent));
 }
 
+.finops-divider--section {
+  margin: 1.5rem 0 1.35rem;
+}
 .finops-divider {
   margin: 2rem 0;
   border: none;
@@ -561,6 +624,14 @@ def _flow_step(num: int, title: str, subtitle: str='') -> None:
     sub = f'<p class="finops-flow-sub">{subtitle}</p>' if subtitle else ''
     st.markdown(f'<div class="finops-flow-step"><span class="finops-flow-num">{num}</span><div><p class="finops-flow-title">{title}</p>{sub}</div></div>', unsafe_allow_html=True)
 
+
+def _flow_optional(title: str, subtitle: str='') -> None:
+    sub = f'<p class="finops-flow-sub">{subtitle}</p>' if subtitle else ''
+    st.markdown(
+        f'<div class="finops-flow-step finops-flow-step--optional"><span class="finops-flow-badge-opt">Optional</span><div><p class="finops-flow-title">{title}</p>{sub}</div></div>',
+        unsafe_allow_html=True,
+    )
+
 def _savings_for_kpi(v) -> float | None:
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return None
@@ -594,107 +665,23 @@ _pill_class = 'finops-pill finops-pill--stale' if stale else 'finops-pill finops
 st.markdown(f'''<div class="finops-hero"><div class="finops-hero-inner">
 <p class="finops-eyebrow">Decision support · EC2 &amp; RDS</p>
 <h1 class="finops-headline">FinOps Optimizer</h1>
-<p class="finops-tagline">Upload your export, map columns once, and see indicative savings from a static AWS list-price snapshot — before you commit to changes.</p>
+<p class="finops-tagline">Follow the steps down this page: upload one spreadsheet (or merge two first), map columns if asked, run enrichment, then export. Savings are indicative from on-demand list prices for the region you pick—not invoices.</p>
 <span class="{_pill_class}">{html.escape(pill)}</span>
 </div></div>''', unsafe_allow_html=True)
-_flow_step(1, 'Bring your file', 'CSV or Excel. Your columns stay in order; we only add enrichment after the instance column.')
-st.markdown('<div class="finops-sec">File</div>', unsafe_allow_html=True)
-uploaded = st.file_uploader('Drop your spreadsheet', type=['csv', 'xlsx', 'xls'], label_visibility='visible')
-st.caption('Include the column with AWS API Names (e.g. m5.large, db.r5.xlarge).')
-st.markdown('<div id="finops-home-toolbar-anchor"></div>', unsafe_allow_html=True)
-(reg_col, svc_col, cpu_col, go_col) = st.columns([2.5, 3.2, 2.0, 1.8], gap='medium')
-with reg_col:
-    st.markdown('<div class="finops-sec">Pricing region</div>', unsafe_allow_html=True)
-    region_opts = [f'{label}  [{rid}]' for (rid, label) in SUPPORTED_REGIONS]
-    default_idx = [r for (r, _) in SUPPORTED_REGIONS].index(DEFAULT_REGION)
-    sel_disp = st.selectbox('region', region_opts, index=default_idx, label_visibility='collapsed')
-    sel_region = [r for (r, _) in SUPPORTED_REGIONS][region_opts.index(sel_disp)]
-    st.session_state['region_id'] = sel_region
-with svc_col:
-    st.markdown('<div class="finops-sec">Service</div>', unsafe_allow_html=True)
-    st.session_state['service'] = st.radio('svc', ['ec2', 'rds', 'both'], format_func=lambda x: {'ec2': 'EC2', 'rds': 'RDS', 'both': 'Both'}[x], label_visibility='collapsed', horizontal=True)
-with cpu_col:
-    st.markdown('<div class="finops-sec">CPU</div>', unsafe_allow_html=True)
-    st.session_state['cpu_filter'] = st.selectbox('cpu', ['both', 'default', 'intel', 'graviton'], format_func=lambda x: {'both': 'Both', 'default': 'Default', 'intel': 'Intel', 'graviton': 'Graviton'}[x], label_visibility='collapsed')
-with go_col:
-    st.markdown('<div class="finops-sec">Next</div>', unsafe_allow_html=True)
-    run = st.button('Continue', type='primary', disabled=uploaded is None, use_container_width=True)
-_reg = st.session_state.get('region_id', DEFAULT_REGION)
-_rid_s = html.escape(_reg.strip().lower())
-_rlabel_s = html.escape(REGION_LABELS.get(_reg.strip().lower(), _reg))
-_asof_s = html.escape(CACHE_METADATA['last_updated'].strftime('%Y-%m-%d'))
-_src_s = html.escape(PRICING_SOURCE_LABEL)
-_disc_s = html.escape(cost_disclaimer_text(_reg))
-_dec_s = html.escape(DECISION_SUPPORT_NOTE)
-st.markdown(f'''<div class="finops-card finops-trust-panel">
-<div class="finops-trust-snapshot" role="status">
-<div class="finops-trust-snapshot-head">
-<span class="finops-trust-snapshot-title">Pricing snapshot</span>
-<code class="finops-trust-region-code">{_rid_s}</code>
-</div>
-<div class="finops-trust-meta">
-<span class="finops-trust-chip"><span class="finops-trust-chip-label">Region</span><span class="finops-trust-chip-val">{_rlabel_s}</span></span>
-<span class="finops-trust-chip"><span class="finops-trust-chip-label">Source</span><span class="finops-trust-chip-val">{_src_s}</span></span>
-<span class="finops-trust-chip"><span class="finops-trust-chip-label">Dataset as of</span><span class="finops-trust-chip-val">{_asof_s}</span></span>
-</div>
-</div>
-<div class="finops-trust-rule" role="presentation"></div>
-<p class="finops-trust-emph">{_disc_s}</p>
-<p class="finops-card-body">{_dec_s}</p>
-<p class="finops-card-body finops-trust-foot">Indicative savings only. Original columns preserved. Unknown API names or SKUs show <strong>N/A</strong>—never a guess.</p>
-</div>''', unsafe_allow_html=True)
-with st.expander('Quick guide — what to select and when', expanded=False):
-    st.markdown(
-        """
-**1. Before you upload (you can change this later before enrichment)**  
-- **Pricing region** — Pick the AWS region where those instances run. Every indicative $ and % uses **on-demand list prices for that region** (see the **Pricing snapshot** card above after you choose).  
-- **Service** — **EC2** if rows are only compute instances; **RDS** if they are only `db.*` database classes; **Both** if the sheet mixes EC2 and RDS.  
-- **CPU** — **Both** is the usual choice. Use **Graviton** when you want ARM-based alternatives emphasized; **Intel** to keep recommendations on x86; **Default** follows the default processor for each instance family.
-
-**2. Upload → Continue**  
-Load CSV or Excel. If the tool is unsure, you’ll map **instance / DB class**, **OS or engine**, and **actual cost** (cost is required for meaningful savings %).
-
-**3. Run enrichment**  
-List prices are applied using your **region + service + CPU** settings. If you change any of those after enriching, click **Run enrichment** again.
-
-**4. Results**  
-Filter and search the table, then download **Excel** (disclaimers + metadata) or **CSV** (table only).
-
-**Optional — Fix Your Sheet**  
-Two files (e.g. inventory + cost extract)? Merge on a shared ID first, then map and enrich as above.
-
-_Full limitations and legal notes: **How it works · Limitations** (below)._
-"""
-    )
-with st.expander('How it works · Limitations', expanded=False):
-    st.markdown(
-        """
-**What this tool does**
-- Enriches your uploaded spreadsheet with **Actual Cost** (from your file), **recommended instance classes** (Alt1 / Alt2), **indicative alt costs**, and **savings %** using **static AWS on-demand list prices** from a **local dataset** (no live AWS Pricing API calls).
-- Supports **EC2** and **RDS** API names (`m5.large`, `db.r5.xlarge`, …) and **Service** mode (EC2-only, RDS-only, or both).
-
-**What it does not do**
-- It does **not** replace **AWS Billing**, **Cost Explorer**, or **CUR**; it does **not** apply your enterprise discounts, Reserved Instances, or Savings Plans.
-- It does **not** prove performance or compatibility (especially **Graviton**); engineering must validate before production changes.
-
-**How to use it**
-1. Upload CSV or Excel (all original columns stay in order).  
-2. Choose **Pricing region** (default Ireland `eu-west-1`).  
-3. Pick **Service** (EC2 / RDS / Both) and **CPU** mode for enrichment.  
-4. Map **instance** and **OS** columns if prompted; choose **cost** column if needed.  
-5. **Run enrichment**, then filter, export **Excel** (includes disclaimer + pricing metadata) or **CSV** (table only).
-
-**Limitations**
-- Values are **indicative**; validate against **actual invoices** before decisions.  
-- Many **RDS** SKUs may be missing from the local table → **N/A**.
-- If there is **no second distinct** recommendation (only one upgrade tier), **Alt2 Instance** shows **N/A (No distinct alternative)**—not a silent blank.
-- Pricing snapshot **as-of** date is shown above and in the Excel **Metadata** sheet.
-
-**Fix Your Sheet (optional)**  
-Merge two uploads (e.g. inventory + cost extract) on a common ID **before** enrichment. Dataset 1 is primary: its columns and order are kept; only **new** columns from Dataset 2 are appended, with values filled where D1 cells are empty.
-"""
-    )
-_flow_step(2, 'Fix Your Sheet (optional)', 'Two files—inventory plus cost extract? Merge on a shared ID. Primary file keeps its column order; we only append new columns from the second file.')
+st.markdown(
+    '<div class="finops-journey" role="navigation" aria-label="Main steps on this page">'
+    '<span><strong>1</strong> Upload &amp; pricing settings</span><span class="finops-journey-sep" aria-hidden="true">→</span>'
+    '<span><strong>2</strong> Map columns</span><span class="finops-journey-sep" aria-hidden="true">→</span>'
+    '<span><strong>3</strong> Run enrichment</span><span class="finops-journey-sep" aria-hidden="true">→</span>'
+    '<span><strong>4</strong> Results &amp; download</span>'
+    '<span class="finops-journey-note">Optional block is <em>first</em> below—merge two files only if you need one combined table before step 1.</span>'
+    '</div>',
+    unsafe_allow_html=True,
+)
+_flow_optional(
+    'Merge two spreadsheets first',
+    'Skip this if you already have one file. Merge on a shared ID, then use <strong>Use merged data</strong> or upload the result in step 1.',
+)
 with st.container():
     st.markdown('<div id="finops-fix-sheet-anchor"></div>', unsafe_allow_html=True)
     st.markdown(
@@ -749,6 +736,94 @@ if _fix_mdf is not None:
         st.session_state.pop('fix_merged_df', None)
         st.session_state.pop('fix_merge_warnings', None)
         st.rerun()
+st.markdown('<div class="finops-divider finops-divider--section" role="separator" aria-hidden="true"></div>', unsafe_allow_html=True)
+_flow_step(1, 'Upload and set pricing', 'Add your file, choose region / service / CPU, then Continue. Your original column order is kept; we only append enrichment after the instance column.')
+st.markdown('<div class="finops-sec">Spreadsheet</div>', unsafe_allow_html=True)
+uploaded = st.file_uploader('Drop your spreadsheet', type=['csv', 'xlsx', 'xls'], label_visibility='visible')
+st.caption('Needs a column with AWS API-style names (e.g. m5.large, db.r5.xlarge).')
+st.markdown('<div id="finops-home-toolbar-anchor"></div>', unsafe_allow_html=True)
+(reg_col, svc_col, cpu_col, go_col) = st.columns([2.5, 3.2, 2.0, 1.8], gap='medium')
+with reg_col:
+    st.markdown('<div class="finops-sec">Pricing region</div>', unsafe_allow_html=True)
+    region_opts = [f'{label}  [{rid}]' for (rid, label) in SUPPORTED_REGIONS]
+    default_idx = [r for (r, _) in SUPPORTED_REGIONS].index(DEFAULT_REGION)
+    sel_disp = st.selectbox('region', region_opts, index=default_idx, label_visibility='collapsed')
+    sel_region = [r for (r, _) in SUPPORTED_REGIONS][region_opts.index(sel_disp)]
+    st.session_state['region_id'] = sel_region
+with svc_col:
+    st.markdown('<div class="finops-sec">Service</div>', unsafe_allow_html=True)
+    st.session_state['service'] = st.radio('svc', ['ec2', 'rds', 'both'], format_func=lambda x: {'ec2': 'EC2', 'rds': 'RDS', 'both': 'Both'}[x], label_visibility='collapsed', horizontal=True)
+with cpu_col:
+    st.markdown('<div class="finops-sec">CPU</div>', unsafe_allow_html=True)
+    st.session_state['cpu_filter'] = st.selectbox('cpu', ['both', 'default', 'intel', 'graviton'], format_func=lambda x: {'both': 'Both', 'default': 'Default', 'intel': 'Intel', 'graviton': 'Graviton'}[x], label_visibility='collapsed')
+with go_col:
+    st.markdown('<div class="finops-sec">Next</div>', unsafe_allow_html=True)
+    run = st.button('Continue', type='primary', disabled=uploaded is None, use_container_width=True)
+_reg = st.session_state.get('region_id', DEFAULT_REGION)
+_rid_s = html.escape(_reg.strip().lower())
+_rlabel_s = html.escape(REGION_LABELS.get(_reg.strip().lower(), _reg))
+_asof_s = html.escape(CACHE_METADATA['last_updated'].strftime('%Y-%m-%d'))
+_src_s = html.escape(PRICING_SOURCE_LABEL)
+_disc_s = html.escape(cost_disclaimer_text(_reg))
+_dec_s = html.escape(DECISION_SUPPORT_NOTE)
+st.markdown(f'''<div class="finops-card finops-trust-panel">
+<p class="finops-trust-preface">The region and snapshot below are what we use when you <strong>Run enrichment</strong> (step 3) and in Excel exports—not a live bill.</p>
+<div class="finops-trust-snapshot" role="status">
+<div class="finops-trust-snapshot-head">
+<span class="finops-trust-snapshot-title">Pricing snapshot</span>
+<code class="finops-trust-region-code">{_rid_s}</code>
+</div>
+<div class="finops-trust-meta">
+<span class="finops-trust-chip"><span class="finops-trust-chip-label">Region</span><span class="finops-trust-chip-val">{_rlabel_s}</span></span>
+<span class="finops-trust-chip"><span class="finops-trust-chip-label">Source</span><span class="finops-trust-chip-val">{_src_s}</span></span>
+<span class="finops-trust-chip"><span class="finops-trust-chip-label">Dataset as of</span><span class="finops-trust-chip-val">{_asof_s}</span></span>
+</div>
+</div>
+<div class="finops-trust-rule" role="presentation"></div>
+<p class="finops-trust-emph">{_disc_s}</p>
+<p class="finops-card-body">{_dec_s}</p>
+<p class="finops-card-body finops-trust-foot">Indicative savings only. Original columns preserved. Unknown API names or SKUs show <strong>N/A</strong>—never a guess.</p>
+</div>''', unsafe_allow_html=True)
+with st.expander('Quick guide (same order as this page)', expanded=False):
+    st.markdown(
+        """
+**Step 1 — Upload and set pricing**  
+Pick **Pricing region** (list prices for that region), **Service** (EC2 / RDS / Both), and **CPU** (usually Both). Upload CSV or Excel, then **Continue**.
+
+**Optional — Merge two files first** (at the top of the page, before step 1)  
+Skip if you already have one table. Merge on a shared ID, then **Use merged data** or upload the merged file in step 1.
+
+**Step 2 — Map columns** (only if the tool asks)  
+Choose **instance / DB class**, **OS or engine**, and **actual cost** when prompted. Cost drives meaningful savings %.
+
+**Step 3 — Run enrichment**  
+Uses your region + service + CPU. If you change those after enriching, click **Run enrichment** again.
+
+**Step 4 — Results and download**  
+Filter the table, then **Excel** (disclaimers + metadata) or **CSV** (table only).
+
+_More detail and caveats: **How it works · Limitations** below._
+"""
+    )
+with st.expander('How it works · Limitations', expanded=False):
+    st.markdown(
+        """
+**Same story as the page**  
+The strip under the title is the main path: **1 → 2 → 3 → 4**. The **Optional** merge block comes **first** on the page; skip it if you do not need two files combined.
+
+**What this tool does**  
+Adds **Alt instances**, **indicative costs**, and **savings %** using **static on-demand list prices** from a **local dataset** (no live AWS Pricing API). Keeps your columns in order; appends enrichment after the instance column.
+
+**What it does not do**  
+Does not replace **Billing**, **Cost Explorer**, or **CUR**; does not apply **RI**, **SP**, or **enterprise discounts**. Does not prove **performance** or **Graviton** fit—validate in engineering before production.
+
+**Limitations**  
+Indicative values only—invoices win. Many **RDS** SKUs may be missing → **N/A**. If there is no second distinct recommendation, **Alt2** shows **N/A (No distinct alternative)**. Snapshot **as-of** appears in the card above and in Excel **Metadata**.
+
+**Optional merge**  
+Dataset 1 is primary (column order kept). Dataset 2 adds columns; values fill where primary cells are empty. This block is at the **top** of the page, before step 1.
+"""
+    )
 st.markdown('<div class="finops-divider" role="separator" aria-hidden="true"></div>', unsafe_allow_html=True)
 if run and uploaded:
     with st.spinner('Loading…'):
@@ -780,7 +855,7 @@ if st.session_state.get('binding') is not None:
 if lr is not None and (not binding_ready):
     cols_all = list(lr.df.columns)
     if lr.needs_instance_pick or lr.needs_os_pick:
-        _flow_step(3, 'Map columns', 'Tell us which columns hold the instance API name and OS (or engine).')
+        _flow_step(2, 'Map columns', 'Point to the instance / DB class column, OS or engine, and actual cost when asked.')
         (mc1, mc2) = st.columns(2)
         with mc1:
             di = 0
@@ -823,7 +898,7 @@ if lr is not None and st.session_state.get('binding') is not None:
     chosen_binding = st.session_state['binding']
     binding_ready = True
     if st.session_state.get('result') is None:
-        _flow_step(4, 'Run enrichment', 'Applies list prices for the region you chose and fills Alt instance, costs, and savings.')
+        _flow_step(3, 'Run enrichment', 'Applies list prices for your region and fills Alt instances, indicative costs, and savings.')
         if st.button('Run enrichment', type='primary', key='run_enrich'):
             try:
                 svc = st.session_state['service']
@@ -842,7 +917,7 @@ df_out: pd.DataFrame | None = st.session_state.get('result')
 if df_out is not None:
     if st.session_state.get('_enrich_svc') != st.session_state.get('service') or st.session_state.get('_enrich_cpu') != st.session_state.get('cpu_filter'):
         st.warning('Service or CPU mode changed since last enrichment — click **Run enrichment** to refresh.')
-    st.markdown('<div class="finops-flow-step" style="margin-top:1.5rem;border-bottom:none;"><span class="finops-flow-num" style="background:var(--st-green-color,#34c759);">5</span><div><p class="finops-flow-title">Results</p><p class="finops-flow-sub">Filter, search, then download Excel or CSV.</p></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="finops-flow-step" style="margin-top:1.5rem;border-bottom:none;"><span class="finops-flow-num" style="background:var(--st-green-color,#34c759);">4</span><div><p class="finops-flow-title">Results</p><p class="finops-flow-sub">Filter and search the table, then download Excel or CSV.</p></div></div>', unsafe_allow_html=True)
     (f1, f2, f3, f4) = st.columns([1, 1, 1, 3])
     with f1:
         vf_svc = st.radio('View service', ['all', 'ec2', 'rds'], format_func=lambda x: {'all': 'Both (show all)', 'ec2': 'EC2 rows only', 'rds': 'RDS rows only'}[x], horizontal=True)
@@ -917,9 +992,9 @@ if df_out is not None:
     with dx2:
         st.download_button('Download CSV', export_df.to_csv(index=False).encode(), 'finops_recommendations.csv', 'text/csv', use_container_width=True)
 elif lr is None:
-    st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Ready when you are</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Upload a file above and tap <strong>Continue</strong>. We’ll guide you through mapping and enrichment.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Start at step 1</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Upload a spreadsheet and click <strong>Continue</strong>. Steps 2–4 appear after that.</p></div>', unsafe_allow_html=True)
 elif not binding_ready:
-    st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Almost there</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Finish column mapping (and cost column if asked), then run enrichment.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Finish step 2</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Complete column mapping (and pick a cost column if asked), then go to step 3.</p></div>', unsafe_allow_html=True)
 st.markdown(
     '<footer class="finops-page-footer" role="contentinfo">'
     '<span class="finops-page-footer-brand">FinOps Optimizer</span>'
