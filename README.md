@@ -1,5 +1,7 @@
-# FinOps EC2 Optimizer · v1.3
+# FinOps EC2 Optimizer · v1.4
 **Production-grade AWS EC2 cost optimisation tool for enterprise datasets.**
+
+Release v1.4: workspace aligned with [Finops_OnDemand](https://github.com/BSTushar/Finops_OnDemand) main (April 2026).
 
 ---
 
