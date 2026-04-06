@@ -76,7 +76,7 @@ open http://localhost:8501
 |---|---|
 | **Guided UI** | Numbered steps, hero headline, trust card, pill buttons |
 | File upload | CSV, XLSX, XLS |
-| **Fix Your Sheet** | Optional merge of two files on a common ID (`sheet_merger.py`) |
+| **Fix Your Sheet** | Optional merge on a common ID: **exact** normalized key first, then **core id** tokens (`[a-z]` + ≥3 digits, no false partials); one output row per primary row (`sheet_merger.py`) |
 | Auto column detection | Broad header hints; manual mapping when ambiguous |
 | Pricing | Local static lists, 4 regions (no live Pricing API) |
 | Service modes | EC2-only, RDS-only, or both |
@@ -84,7 +84,8 @@ open http://localhost:8501
 | Recommendations | Alt1 / Alt2 instance API names + projected costs & savings % |
 | Table | Colour hints on savings columns; scrollable frame |
 | Filters | View EC2/RDS subset, OS text filter, column search |
-| KPI tiles | Row count, avg / max Alt1 savings, actual-cost flag |
+| KPI tiles | Portfolio strip + row stats (incl. max **Alt1** & **Alt2** savings, older-gen expander); table **$** / **%** display |
+| **Discount %** | After **Actual Cost ($)** — compares actual to **Current Price ($/hr)** (N/A / No Discount / 1 decimal); use when actual is comparable to hourly list (e.g. effective $/hr) |
 | Export | Excel (disclaimer + metadata rows) + CSV (table only) |
 | Scale | Tested 10k+ rows |
 | Security posture | App pricing logic uses **local** datasets only (no `requests`/`urllib` in tool `.py`) |
@@ -93,17 +94,22 @@ open http://localhost:8501
 
 ## Output columns (after enrichment)
 
-New columns are inserted **immediately after** your mapped **instance** column (original columns otherwise **unchanged**):
+New columns are inserted **immediately after** your mapped **instance** column (original columns otherwise **unchanged**), in this order:
 
 | Column | Meaning |
 |---|---|
+| `Pricing OS` | Normalized **Linux** / **Windows** for list-price bucket |
 | `Actual Cost ($)` | From your file (optional column) |
-| `Alt1 Instance` / `Alt2 Instance` | Suggested API names |
-| `Alt1 Cost ($)` / `Alt2 Cost ($)` | Indicative, from list-price ratio × actual |
-| `Alt1 Savings %` / `Alt2 Savings %` | vs actual, or “No Savings” / `N/A` |
-| `Alt2 Instance` (edge case) | If only one distinct upgrade exists, shows **`N/A (No distinct alternative)`** instead of an empty cell |
+| `Discount %` | `(Current Price ($/hr) − Actual Cost ($)) / Current Price ($/hr) × 100` when both are valid and **> 0**; **`No Discount`** if actual ≥ list; else **`N/A`**. Assumes actual is comparable to **hourly** list (e.g. effective $/hr). |
+| `Current Price ($/hr)` | Indicative on-demand list **hourly** (eu-west-1 bundled dataset) |
+| `Alt1 Instance` / `Alt2 Instance` | Suggested API names (`db.*` for RDS) |
+| `Alt1 Price ($/hr)` / `Alt2 Price ($/hr)` | Indicative list **hourly** for those classes |
+| `Alt1 Savings %` / `Alt2 Savings %` | vs list current hourly, or **No Savings** / **N/A** |
+| `Alt2 Instance` (edge cases) | May show **`N/A (No distinct alternative)`** or **`N/A (No compatible alternative)`** (e.g. Windows vs Graviton) |
 
-All **original** columns remain, in order, before/after that block.
+Merge **flag** columns (`FinOps_Merge_*`) appear only when using **Fix Your Sheet**.
+
+All **original** columns stay in place around this inserted block.
 
 ---
 
