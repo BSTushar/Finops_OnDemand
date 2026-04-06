@@ -16,7 +16,7 @@ class TestAdversarialProcessor(unittest.TestCase):
         b = ColumnBinding(instance='i', os='o', actual_cost='c')
         out = apply_na_fill(process(df, b, region='eu-west-1'))
         self.assertEqual(len(out), 2)
-        self.assertTrue(all(x in ('N/A', 'No Savings', None) or isinstance(x, (int, float, str)) for x in out['Alt1 Cost ($)']))
+        self.assertTrue(all(x in ('N/A', 'No Savings', None) or isinstance(x, (int, float, str)) for x in out['Alt1 Price ($/hr)']))
 
     def test_formula_injection_string_cell_no_exec(self):
         df = pd.DataFrame({'i': ["=1+1 cmd|'/c calc'"], 'o': ['linux'], 'c': [1.0]})

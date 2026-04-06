@@ -41,7 +41,7 @@ class TestIrelandPricingLocked(unittest.TestCase):
 
 
 class TestCostFormula(unittest.TestCase):
-    def test_alt_cost_and_no_savings(self):
+    def test_hourly_prices_and_savings_percent(self):
         df = pd.DataFrame({'API Name': ['m5.large'], 'OS': ['linux'], 'Spend': [100.0]})
         b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')
         out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
@@ -51,12 +51,12 @@ class TestCostFormula(unittest.TestCase):
         p_alt = get_price('m6i.large', region='eu-west-1', os='linux')
         self.assertIsNotNone(p_cur)
         self.assertIsNotNone(p_alt)
-        expected_alt_cost = round(100.0 * (p_alt / p_cur), 4)
-        self.assertAlmostEqual(float(out['Alt1 Cost ($)'].iloc[0]), expected_alt_cost, places=4)
-        if expected_alt_cost >= 100.0:
+        self.assertAlmostEqual(float(out['Current Price ($/hr)'].iloc[0]), float(p_cur), places=6)
+        self.assertAlmostEqual(float(out['Alt1 Price ($/hr)'].iloc[0]), float(p_alt), places=6)
+        if p_alt >= p_cur:
             self.assertEqual(out['Alt1 Savings %'].iloc[0], 'No Savings')
         else:
-            pct = round((100.0 - expected_alt_cost) / 100.0 * 100, 1)
+            pct = round((float(p_cur) - float(p_alt)) / float(p_cur) * 100, 1)
             self.assertEqual(float(out['Alt1 Savings %'].iloc[0]), pct)
 
 
@@ -149,7 +149,8 @@ class TestExtremeEdges(unittest.TestCase):
         lr = finalize_binding(analyze_load(df, []), 'Instance', 'OS', None)
         out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1'))
         self.assertEqual(out['Actual Cost ($)'].iloc[0], 'N/A')
-        self.assertEqual(out['Alt1 Cost ($)'].iloc[0], 'N/A')
+        self.assertNotEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
+        self.assertNotEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')
 
 
 class TestRdsMsg1Shape(unittest.TestCase):
@@ -205,7 +206,19 @@ class TestPreshipServiceSmoke(unittest.TestCase):
 
     def test_ec2_mode(self):
         out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='ec2', cpu_filter='both'))
-        self.assertEqual(list(out.columns[:6]), ['Instance', 'Pricing OS', 'Actual Cost ($)', 'Alt1 Instance', 'Alt1 Cost ($)', 'Alt1 Savings %'])
+        self.assertEqual(
+            list(out.columns[:8]),
+            [
+                'Instance',
+                'Pricing OS',
+                'Actual Cost ($)',
+                'Current Price ($/hr)',
+                'Alt1 Instance',
+                'Alt1 Price ($/hr)',
+                'Alt1 Savings %',
+                'Alt2 Instance',
+            ],
+        )
         self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
         self.assertEqual(out['Alt1 Instance'].iloc[1], 'N/A')
 

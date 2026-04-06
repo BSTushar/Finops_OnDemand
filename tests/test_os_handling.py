@@ -1,9 +1,29 @@
 from __future__ import annotations
 import unittest
+from decimal import Decimal
 import pandas as pd
 from data_loader import ColumnBinding, analyze_load, finalize_binding
-from os_resolve import cell_matches_valid_os_pattern, engine_os_for_pricing, normalize_pricing_os_display
-from processor import INSERT_COLS, apply_na_fill, process
+from os_resolve import LINUX_FALLBACK_LABEL, cell_matches_valid_os_pattern, engine_os_for_pricing, normalize_pricing_os_display
+from pricing_engine import normalize_pricing_region
+from pricing_normalize import LINUX_FALLBACK_LABEL as PN_LINUX_FALLBACK
+from pricing_normalize import normalize_instance_string, normalize_os, normalize_os_engine_key, normalize_pricing_os_label
+
+assert LINUX_FALLBACK_LABEL == PN_LINUX_FALLBACK, 'LINUX_FALLBACK_LABEL must match pricing_normalize'
+from processor import INSERT_COLS, _to_float, apply_na_fill, process
+
+
+class TestPricingNormalization(unittest.TestCase):
+
+    def test_instance_strip_lower(self):
+        self.assertEqual(normalize_instance_string('   M5.LARGE   '), 'm5.large')
+
+    def test_os_windows_substring_and_sql(self):
+        self.assertEqual(normalize_os('Windows Server 2022'), 'Windows')
+        self.assertEqual(normalize_os_engine_key('Microsoft SQL Server'), 'windows')
+
+    def test_region_exact_id(self):
+        self.assertEqual(normalize_pricing_region('EU-WEST-1 '), 'eu-west-1')
+        self.assertEqual(normalize_pricing_region('eu-west-99'), 'eu-west-1')
 
 
 class TestOsValuePatterns(unittest.TestCase):
@@ -19,8 +39,8 @@ class TestOsValuePatterns(unittest.TestCase):
     def test_normalize_display_buckets(self):
         self.assertEqual(normalize_pricing_os_display('ubuntu'), 'Linux')
         self.assertEqual(normalize_pricing_os_display('Win10'), 'Windows')
-        self.assertEqual(normalize_pricing_os_display(''), 'Linux')
-        self.assertEqual(normalize_pricing_os_display(None), 'Linux')
+        self.assertEqual(normalize_pricing_os_display(''), LINUX_FALLBACK_LABEL)
+        self.assertEqual(normalize_pricing_os_display(None), LINUX_FALLBACK_LABEL)
 
     def test_engine_default_linux(self):
         self.assertEqual(engine_os_for_pricing(''), 'linux')
@@ -58,7 +78,7 @@ class TestDynamicOsColumnDetection(unittest.TestCase):
         self.assertEqual(lr.binding.os, 'x')
         out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1'))
         self.assertEqual(out['Pricing OS'].iloc[0], 'Linux')
-        self.assertEqual(out['Pricing OS'].iloc[1], 'Linux')
+        self.assertEqual(out['Pricing OS'].iloc[1], LINUX_FALLBACK_LABEL)
 
     def test_no_os_column_auto_binding(self):
         df = pd.DataFrame({'shape': ['m5.large'], 'note': ['prod'], 'amt': [10.0]})
@@ -66,7 +86,7 @@ class TestDynamicOsColumnDetection(unittest.TestCase):
         self.assertIsNone(lr.binding.os)
         self.assertFalse(lr.needs_os_pick)
         out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1', service='both'))
-        self.assertEqual(out['Pricing OS'].tolist(), ['Linux'])
+        self.assertEqual(out['Pricing OS'].tolist(), [LINUX_FALLBACK_LABEL])
 
     def test_ambiguous_two_os_columns(self):
         df = pd.DataFrame(
@@ -85,7 +105,7 @@ class TestDynamicOsColumnDetection(unittest.TestCase):
         df = pd.DataFrame({'i': ['m5.large'], 'c': [100.0]})
         b = ColumnBinding(instance='i', os=None, actual_cost='c')
         out = apply_na_fill(process(df, b, region='eu-west-1'))
-        self.assertEqual(out['Pricing OS'].iloc[0], 'Linux')
+        self.assertEqual(out['Pricing OS'].iloc[0], LINUX_FALLBACK_LABEL)
         self.assertIn('Alt1 Instance', out.columns)
 
 
@@ -128,6 +148,46 @@ class TestProductColumnUnixAndCostInference(unittest.TestCase):
         self.assertEqual(lr.binding.actual_cost, 'MyMoneyCol')
         out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1'))
         self.assertNotEqual(out['Actual Cost ($)'].iloc[0], 'N/A')
+
+
+class TestOsValueScanAcrossColumns(unittest.TestCase):
+
+    def test_os_picked_from_product_when_bound_os_column_empty(self):
+        df = pd.DataFrame(
+            {
+                'vm': ['m5.large'],
+                'System': [pd.NA],
+                'Product': ['Amazon Linux 2'],
+                'Spend': [100.0],
+            }
+        )
+        b = ColumnBinding(instance='vm', os='System', actual_cost='Spend')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
+        self.assertEqual(out['Pricing OS'].iloc[0], 'Linux')
+        self.assertNotEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')
+
+
+class TestNonPositiveActualCost(unittest.TestCase):
+
+    def test_zero_spend_na_actual_list_prices_unaffected(self):
+        df = pd.DataFrame({'Instance': ['m5.large'], 'Product': ['linux'], 'SpendUSD': [0.0]})
+        lr = analyze_load(df, [])
+        b = ColumnBinding(instance=lr.binding.instance, os=lr.binding.os, actual_cost=lr.binding.actual_cost)
+        out = apply_na_fill(process(lr.df, b, region='eu-west-1'))
+        self.assertEqual(out['Actual Cost ($)'].iloc[0], 'N/A')
+        self.assertNotEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
+        self.assertNotEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')
+
+
+class TestToFloatParsing(unittest.TestCase):
+
+    def test_currency_commas_whitespace(self):
+        self.assertEqual(_to_float('$1,234.56'), 1234.56)
+        self.assertEqual(_to_float('€ 99.5'), 99.5)
+        self.assertEqual(_to_float(' 42 '), 42.0)
+
+    def test_decimal_type(self):
+        self.assertEqual(_to_float(Decimal('88.25')), 88.25)
 
 
 class TestFinalizeBindingOptionalOs(unittest.TestCase):

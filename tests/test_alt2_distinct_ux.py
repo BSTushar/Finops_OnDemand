@@ -12,7 +12,7 @@ class TestAlt2DistinctMessage(unittest.TestCase):
         out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
         self.assertEqual(out['Alt1 Instance'].iloc[0], 'c7g.large')
         self.assertEqual(out['Alt2 Instance'].iloc[0], ALT2_NO_DISTINCT)
-        self.assertEqual(out['Alt2 Cost ($)'].iloc[0], 'N/A')
+        self.assertEqual(out['Alt2 Price ($/hr)'].iloc[0], 'N/A')
         self.assertEqual(out['Alt2 Savings %'].iloc[0], 'N/A')
 
     def test_m5_has_two_distinct_alts_no_placeholder(self):

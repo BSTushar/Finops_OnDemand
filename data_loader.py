@@ -78,13 +78,37 @@ def _score_os_columns(df: pd.DataFrame) -> list[tuple[str, float]]:
     scored: list[tuple[str, float]] = []
     for col in df.columns:
         vr = _value_match_ratio(df, col, cell_matches_valid_os_pattern)
+        hn = _norm_header(str(col)).replace(' ', '')
+        if vr >= 0.08 and any((sub in hn for sub in _OS_HEADER_HINT_SUBSTR)):
+            vr = min(1.0, vr + 0.14)
         scored.append((col, min(1.0, vr)))
     scored.sort(key=lambda x: (-x[1], str(x[0])))
     return scored
 
 
-_MIN_OS_AUTO_CONF = 0.30
+def _rank_cost_columns(candidates: list[str]) -> list[str]:
+    """Prefer total / primary cost columns when multiple are detected (e.g. Total_Cost_USD over Backup_Cost)."""
+    if len(candidates) <= 1:
+        return list(candidates)
+
+    def rank_key(name: object) -> tuple[int, str]:
+        n = _norm_header(str(name)).replace(' ', '')
+        if n == 'totalcostusd' or n == 'total_cost_usd':
+            return (0, str(name))
+        if 'total' in n and 'cost' in n and 'usd' in n:
+            return (1, str(name))
+        if 'total' in n and 'cost' in n:
+            return (2, str(name))
+        if n.startswith('total'):
+            return (3, str(name))
+        return (4, str(name))
+
+    return sorted(candidates, key=rank_key)
+
+
+_MIN_OS_AUTO_CONF = 0.22
 _OS_TIE_BAND = 0.09
+_OS_HEADER_HINT_SUBSTR: tuple[str, ...] = ('product', 'platform', 'engine', 'operatingsystem', 'os type')
 
 def _resolve_os_column(df: pd.DataFrame, scored: list[tuple[str, float]]) -> tuple[str | None, bool, list[str]]:
     all_cols = list(df.columns)
@@ -256,6 +280,12 @@ def _coerce_numeric_series(s: pd.Series) -> pd.Series:
 
 def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
     warnings = base_warnings[:]
+    _cols = list(df.columns)
+    if len(_cols) != len(set(_cols)):
+        warnings.append(
+            'Duplicate column names in the file — all columns are kept; enrichment uses the first column for each name you map. '
+            'Rename columns if you need a different occurrence.'
+        )
     inst_scored = _score_instance_columns(df)
     os_scored = _score_os_columns(df)
     (inst_col, inst_amb, inst_ui) = _resolve_best_column(df, inst_scored)
@@ -266,6 +296,7 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
     if os_col is not None and (not os_amb):
         skip_for_cost.add(os_col)
     (cost_c, cost_inferred_values) = find_cost_columns_combined(df, skip_for_cost)
+    cost_c = _rank_cost_columns(cost_c)
     needs_cost_pick = len(cost_c) > 1
     needs_i = inst_amb or inst_col is None
     needs_o = os_amb
@@ -323,7 +354,6 @@ def load_file(file_obj: BinaryIO, filename: str) -> LoadResult:
         raise ValueError('The uploaded file contains no data rows.')
     df = _normalize_loaded_dataframe(df)
     df.dropna(how='all', inplace=True)
-    df.dropna(axis=1, how='all', inplace=True)
     df.reset_index(drop=True, inplace=True)
     if df.empty:
         raise ValueError('All rows are empty after stripping blank lines.')
@@ -342,7 +372,6 @@ def dataframe_from_bytes(raw_bytes: bytes, filename: str) -> pd.DataFrame:
         raise ValueError('The uploaded file contains no data rows.')
     df = _normalize_loaded_dataframe(df)
     df.dropna(how='all', inplace=True)
-    df.dropna(axis=1, how='all', inplace=True)
     df.reset_index(drop=True, inplace=True)
     if df.empty:
         raise ValueError('All rows are empty after stripping blank lines.')

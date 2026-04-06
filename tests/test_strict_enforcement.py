@@ -53,12 +53,22 @@ class TestProcessorStrict(unittest.TestCase):
             process(df, b, region='eu-west-1')
         self.assertIn('reserved', str(ctx.exception).lower())
 
-    def test_duplicate_input_columns_rejected(self):
-        df = pd.DataFrame([[1, 2, 3]], columns=['Instance', 'Instance', 'OS'])
+    def test_duplicate_input_column_names_use_first_for_binding(self):
+        df = pd.DataFrame(
+            [['m5.large', 'm5.large', 'linux']],
+            columns=['Instance', 'Instance', 'OS'],
+        )
         b = ColumnBinding(instance='Instance', os='OS', actual_cost=None)
-        with self.assertRaises(ValueError) as ctx:
-            process(df, b, region='eu-west-1')
-        self.assertIn('duplicate', str(ctx.exception).lower())
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
+        self.assertEqual(len(out), 1)
+        self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+
+    def test_duplicate_cost_column_names_use_first_occurrence(self):
+        df = pd.DataFrame([['m5.large', 'linux', 10.0, 99.0]], columns=['API Name', 'OS', 'Amt', 'Amt'])
+        b = ColumnBinding(instance='API Name', os='OS', actual_cost='Amt')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(float(out['Actual Cost ($)'].iloc[0]), 10.0)
 
     def test_missing_rds_price_recommendations_without_cost(self):
         df = pd.DataFrame({'API Name': ['db.c5.2xlarge'], 'OS': ['linux'], 'Spend': [100.0]})
@@ -68,7 +78,8 @@ class TestProcessorStrict(unittest.TestCase):
         alt1 = out['Alt1 Instance'].iloc[0]
         self.assertIsNotNone(alt1)
         self.assertNotEqual(alt1, 'N/A')
-        self.assertEqual(out['Alt1 Cost ($)'].iloc[0], 'N/A')
+        self.assertEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
+        self.assertEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')
         self.assertEqual(out['Alt1 Savings %'].iloc[0], 'N/A')
 
     def test_invalid_row_no_crash(self):
@@ -76,6 +87,14 @@ class TestProcessorStrict(unittest.TestCase):
         b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')
         out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
         self.assertEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+
+    def test_empty_dataframe_returns_enrichment_columns(self):
+        df = pd.DataFrame(columns=['Instance', 'OS', 'Spend'])
+        b = ColumnBinding(instance='Instance', os='OS', actual_cost='Spend')
+        out = process(df, b, region='eu-west-1')
+        self.assertEqual(len(out), 0)
+        self.assertIn('Pricing OS', out.columns)
+        self.assertIn('Alt1 Instance', out.columns)
 
 
 if __name__ == '__main__':

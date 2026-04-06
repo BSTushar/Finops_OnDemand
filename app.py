@@ -8,7 +8,7 @@ import streamlit as st
 from data_loader import OS_COLUMN_NONE_OPTION, LoadResult, analyze_load, dataframe_from_bytes, finalize_binding, load_file
 from excel_export import build_excel, savings_numeric
 from processor import apply_na_fill, process
-from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, DEFAULT_REGION, PRICING_SOURCE_LABEL, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale, cost_disclaimer_text
+from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, DEFAULT_REGION, PRICING_SOURCE_LABEL, RDS_PRICING_NOTE, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale, cost_disclaimer_text
 from sheet_merger import merge_primary_with_secondary, suggest_key_pairs
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger(__name__)
@@ -47,6 +47,38 @@ def _dataframe_for_streamlit_arrow(df: pd.DataFrame) -> pd.DataFrame:
 
         out[c] = out[c].map(_scalar).astype('string')
     return out
+
+
+def _cell_to_display_str(v: object) -> str:
+    """Stable string for st.dataframe — handles NA, bytes, and mixed types."""
+    if v is None:
+        return ''
+    try:
+        if pd.isna(v):
+            return ''
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, bytes):
+        try:
+            return v.decode('utf-8', errors='replace')
+        except Exception:
+            return str(v)
+    return str(v)
+
+
+def _enriched_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    df_display = df.copy() with every cell as str (spec: astype(str) per column).
+    Implemented by index so duplicate column names don't break pandas `df[col].astype(str)`.
+    """
+    if df.empty:
+        return df.copy()
+    cols: list[pd.Series] = []
+    for i in range(df.shape[1]):
+        name = df.columns[i]
+        vals = [_cell_to_display_str(x) for x in df.iloc[:, i].tolist()]
+        cols.append(pd.Series(vals, name=name, dtype=object))
+    return pd.concat(cols, axis=1)
 
 
 st.set_page_config(page_title='FinOps Optimizer', page_icon='◆', layout='wide', initial_sidebar_state='collapsed')
@@ -974,9 +1006,10 @@ def _savings_for_kpi(v) -> float | None:
     return savings_numeric(v)
 
 def kpis(df: pd.DataFrame) -> dict:
-    s1 = pd.Series([_savings_for_kpi(x) for x in df.get('Alt1 Savings %', [])], dtype=float)
-    s1 = s1.dropna()
-    return {'total': len(df), 'avg1': s1.mean() if len(s1) else None, 'max1': s1.max() if len(s1) else None, 'act_col': 'Actual Cost ($)' in df.columns}
+    col = df.get('Alt1 Savings %')
+    raw = [_savings_for_kpi(x) for x in col] if col is not None and len(col) else []
+    s1 = pd.to_numeric(pd.Series(raw), errors='coerce').dropna()
+    return {'total': len(df), 'avg1': float(s1.mean()) if len(s1) else None, 'max1': float(s1.max()) if len(s1) else None, 'act_col': 'Actual Cost ($)' in df.columns}
 
 def render_kpis(k: dict):
     (c1, c2, c3, c4) = st.columns(4)
@@ -1100,6 +1133,7 @@ _asof_s = html.escape(CACHE_METADATA['last_updated'].strftime('%Y-%m-%d'))
 _src_s = html.escape(PRICING_SOURCE_LABEL)
 _disc_s = html.escape(cost_disclaimer_text(_reg))
 _dec_s = html.escape(DECISION_SUPPORT_NOTE)
+_rds_s = html.escape(RDS_PRICING_NOTE)
 with st.container(border=True):
     st.markdown(f'''<div class="finops-card finops-trust-panel">
 <p class="finops-trust-preface">The region and snapshot below are what we use when you <strong>Run enrichment</strong> (step 3) and in Excel exports—not a live bill.</p>
@@ -1116,6 +1150,7 @@ with st.container(border=True):
 </div>
 <div class="finops-trust-rule" role="presentation"></div>
 <p class="finops-trust-emph">{_disc_s}</p>
+<p class="finops-card-body finops-trust-foot">{_rds_s}</p>
 <p class="finops-card-body">{_dec_s}</p>
 <p class="finops-card-body finops-trust-foot">Indicative savings only. Original columns preserved. Unknown API names or SKUs show <strong>N/A</strong>—never a guess.</p>
 </div>''', unsafe_allow_html=True)
@@ -1283,61 +1318,49 @@ if df_out is not None:
         view = df_out.copy()
         bind = st.session_state.get('binding')
         inst_col = bind.instance if bind else None
-        if vf_svc == 'ec2' and inst_col and (inst_col in view.columns):
-            view = view[~view[inst_col].astype(str).str.lower().str.strip().str.startswith('db.')]
-        elif vf_svc == 'rds' and inst_col and (inst_col in view.columns):
-            view = view[view[inst_col].astype(str).str.lower().str.strip().str.startswith('db.')]
+
+        def _first_col_pos(frame: pd.DataFrame, name: str | None) -> int | None:
+            if not name:
+                return None
+            cols_l = list(frame.columns)
+            try:
+                return cols_l.index(name)
+            except ValueError:
+                return None
+
+        ii = _first_col_pos(view, inst_col)
+        if vf_svc == 'ec2' and ii is not None:
+            view = view[~view.iloc[:, ii].astype(str).str.lower().str.strip().str.startswith('db.')]
+        elif vf_svc == 'rds' and ii is not None:
+            view = view[view.iloc[:, ii].astype(str).str.lower().str.strip().str.startswith('db.')]
         os_col_name = bind.os if bind else None
-        if vf_os and os_col_name and (os_col_name in view.columns):
-            view = view[view[os_col_name].astype(str).str.contains(vf_os, case=False, na=False, regex=False)]
+        if vf_os:
+            oi = _first_col_pos(view, os_col_name)
+            pi = _first_col_pos(view, 'Pricing OS')
+            oidx = oi if oi is not None else pi
+            if oidx is not None:
+                view = view[view.iloc[:, oidx].astype(str).str.contains(vf_os, case=False, na=False, regex=False)]
         if q:
             m = pd.Series(False, index=view.index)
-            for col in view.columns:
-                m |= view[col].astype(str).str.contains(q, case=False, na=False, regex=False)
+            for j in range(view.shape[1]):
+                m |= view.iloc[:, j].astype(str).str.contains(q, case=False, na=False, regex=False)
             view = view[m]
         st.caption(f'Showing **{len(view):,}** of **{len(df_out):,}** rows')
-        _render_dashboard_kpi_strip(_dashboard_strip_metrics(view, inst_col))
-        st.markdown('<p class="finops-kpi-strip-title">Row statistics</p>', unsafe_allow_html=True)
-        render_kpis(kpis(view))
-
-        def _style_sav(v: str) -> str:
-            n = savings_numeric(v)
-            if n is None:
-                return 'opacity: 0.62'
-            if n >= 20:
-                return 'color: var(--st-green-text-color, #22c55e); font-weight:600'
-            if n > 0:
-                return 'color: var(--st-orange-text-color, #f59e0b); font-weight:600'
-            return 'color: var(--st-red-text-color, #ef4444); font-weight:600'
-
-        def _fmt_cell(cname: str):
-
-            def _f(x):
-                if 'Savings %' in cname:
-                    if pd.isna(x) or x is None:
-                        return 'N/A'
-                    return str(x) if isinstance(x, str) else f'{float(x):.1f}%'
-                if 'Cost ($)' in cname:
-                    if pd.isna(x) or x is None:
-                        return 'N/A'
-                    if isinstance(x, (int, float)):
-                        return f'${float(x):,.4f}'
-                    return str(x)
-                return x
-            return _f
-        fmt_map = {c: _fmt_cell(c) for c in view.columns if 'Savings %' in c or 'Cost ($)' in c}
-        style_cols = {c: _style_sav for c in view.columns if 'Savings %' in c}
-        view_ui = _dataframe_for_streamlit_arrow(view)
+        if view.empty and len(df_out) > 0:
+            st.warning(
+                'No rows match your current filters. Clear **Search** and **OS contains**, or set **View service** to **Both (show all)**.'
+            )
         try:
-            sty = view_ui.style.format(fmt_map, na_rep='N/A')
-            for (col_name, fn) in style_cols.items():
-                sty = sty.map(fn, subset=[col_name])
-            sty = sty.set_properties(**{'font-size': '0.8rem'})
+            _render_dashboard_kpi_strip(_dashboard_strip_metrics(view, inst_col))
+            st.markdown('<p class="finops-kpi-strip-title">Row statistics</p>', unsafe_allow_html=True)
+            render_kpis(kpis(view))
         except Exception as ex:
-            log.debug('dataframe style skipped: %s', type(ex).__name__)
-            sty = view_ui
+            log.warning('Results KPI strip skipped: %s', type(ex).__name__)
+
+        df_display = _enriched_table_for_display(view)
         st.markdown('<div id="finops-enriched-df-anchor"></div>', unsafe_allow_html=True)
-        st.dataframe(sty, **_ui_stretch_kwargs(), hide_index=True, height=500)
+        st.caption('Table view uses string cells for stable rendering; export files use typed enrichment data.')
+        st.dataframe(df_display, **_ui_stretch_kwargs(), hide_index=True, height=520)
         export_df = apply_na_fill(df_out)
         reg_id = st.session_state.get('region_id', DEFAULT_REGION)
         reg_lbl = REGION_LABELS.get(reg_id, '')

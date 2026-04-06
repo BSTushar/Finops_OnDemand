@@ -19,9 +19,14 @@ class TestUserSheet1Sheet2Merge(unittest.TestCase):
         merged, w = merge_primary_with_secondary(d1, d2, 'RecordID', 'RecordID')
         self.assertEqual(len(merged), 10)
         self.assertEqual(list(merged.columns)[:9], list(d1.columns))
+        _flags = [
+            'FinOps_Merge_DuplicateSecondaryRows',
+            'FinOps_Merge_SecondaryRowGroupIndex',
+            'FinOps_Merge_DuplicatePrimaryKey',
+        ]
         self.assertEqual(
             list(merged.columns),
-            list(d1.columns) + ['Billing_Amount', 'Region', 'BackupCost', 'ExtraC', 'Notes'],
+            list(d1.columns) + ['Billing_Amount', 'Region', 'BackupCost', 'ExtraC', 'Notes'] + _flags,
         )
         self.assertNotIn('311', set(merged['RecordID'].astype(str)))
         self.assertEqual(str(merged.loc[merged['RecordID'].astype(str) == '301', 'Billing_Amount'].iloc[0]), '125')
