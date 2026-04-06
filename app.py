@@ -1150,7 +1150,10 @@ with st.container(border=True):
     st.markdown('<div id="finops-fix-sheet-anchor"></div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="finops-fix-hint-block"><span class="finops-fix-hint-kicker">How matching works</span>'
-        '<p class="finops-fix-hint">Dataset 1 = primary row layout. Dataset 2 = extra fields (e.g. spend). Match on resource ID, instance ID, or similar.</p></div>',
+        '<p class="finops-fix-hint">Dataset 1 = primary row layout. Dataset 2 = extra fields (e.g. spend). Merge tries '
+        '<strong>exact</strong> normalized keys first (lowercase, trimmed); if needed, the same '
+        '<strong>core id</strong> token (one letter + ≥3 digits, no partial digit tail — e.g. '
+        '<code>a1011</code> inside a longer string). One primary row out per row; duplicate secondary keys use the first row. Check merge warnings.</p></div>',
         unsafe_allow_html=True,
     )
     (fx1, fx2) = st.columns(2)

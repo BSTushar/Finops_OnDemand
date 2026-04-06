@@ -1,8 +1,11 @@
 from __future__ import annotations
 from collections import Counter, defaultdict
+import logging
 import re
 import pandas as pd
 from data_loader import require_unique_column_names
+
+logger = logging.getLogger(__name__)
 
 MERGE_KEY_HINTS: frozenset[str] = frozenset(
     {
@@ -31,6 +34,10 @@ MERGE_KEY_HINTS: frozenset[str] = frozenset(
 FLAG_DUP_SECONDARY = 'FinOps_Merge_DuplicateSecondaryRows'
 FLAG_SECONDARY_REPLICA = 'FinOps_Merge_SecondaryRowGroupIndex'
 FLAG_DUP_PRIMARY_KEY = 'FinOps_Merge_DuplicatePrimaryKey'
+
+# Core id: one ASCII letter + ≥3 digits; must not extend further digits (avoids matching a101 inside a1011).
+_CORE_ID_RE = re.compile(r'[a-z][0-9]{3,}(?![0-9])')
+_FULL_CORE_RE = re.compile(r'^[a-z][0-9]{3,}$')
 
 
 def _norm_header(name: str) -> str:
@@ -92,38 +99,50 @@ def _is_empty_cell(v: object) -> bool:
 
 
 def _norm_key_value(v: object) -> str | None:
+    """Lowercase, strip; None if empty."""
     if _is_empty_cell(v):
         return None
-    s = str(v).strip()
-    if s.lower() in ('nan', 'none', 'n/a', ''):
+    s = str(v).strip().lower()
+    if s in ('nan', 'none', 'n/a', ''):
         return None
     if s.endswith('.0') and s[:-2].isdigit():
         s = s[:-2]
-    return s.lower()
+    return s
 
 
-def _fuzzy_key_match(short: str, long: str) -> bool:
-    """True if long embeds short as a merge key suffix / token (short is the shorter string)."""
-    if len(short) < 4 or len(long) < len(short):
-        return False
-    if long.endswith(short):
-        return True
-    for sep in ('_', '-', '.'):
-        if f'{sep}{short}' in long:
-            return True
-    if len(short) >= 5 and short in long:
-        return True
-    return False
+def _extract_core_tokens(norm: str) -> list[str]:
+    """All core-id tokens in norm (left-to-right, non-overlapping regex findall)."""
+    if not norm:
+        return []
+    return _CORE_ID_RE.findall(norm)
 
 
-def _fuzzy_keys_match(a: str, b: str) -> bool:
-    """Case-normalized keys already; false when identical (caller uses exact map first)."""
-    if a == b:
-        return False
-    if len(a) < 4 or len(b) < 4:
-        return False
-    short, long = (a, b) if len(a) <= len(b) else (b, a)
-    return _fuzzy_key_match(short, long)
+def _canonical_core_for_key(
+    nk: str | None,
+    warnings: list[str],
+    multi_warned: set[str],
+) -> str | None:
+    """
+    Single derived id for matching: full value if it is already a core id; else leftmost extracted token.
+    No substring heuristics — only explicit [a-z][0-9]{3,}(?![0-9]) tokens.
+    """
+    if not nk:
+        return None
+    if _FULL_CORE_RE.match(nk):
+        return nk
+    cores = _extract_core_tokens(nk)
+    if not cores:
+        return None
+    if len(cores) > 1 and nk not in multi_warned:
+        multi_warned.add(nk)
+        warnings.append(
+            f'Merge key value contains multiple extractable core ids ({", ".join(cores[:5])}'
+            f'{"…" if len(cores) > 5 else ""}) — using leftmost ({cores[0]!r}) for matching.'
+        )
+        logger.warning(
+            'Merge: multiple core ids in key value; using leftmost (value prefix omitted).'
+        )
+    return cores[0]
 
 
 def _flag_column_names(d1_columns: list) -> tuple[str, str, str]:
@@ -146,12 +165,16 @@ def merge_primary_with_secondary(
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Build D3: all D1 columns in order, then columns only in D2, then merge flag columns.
-    For each row of D1, match D2 on normalized key. Multiple secondary rows with the same key
-    are all kept (one output row per secondary match). Duplicate primary keys are flagged only.
-    If no exact match, try fuzzy match when the shorter key appears in the longer string.
-    Shared columns: keep D1 value unless empty, then D2.
+
+    Matching (deterministic, one secondary row per primary row at most):
+    1. Normalized exact key (lowercase, stripped).
+    2. Else derived core id from pattern [a-z][0-9]{3,} with no extra trailing digit — embedded
+       tokens only via regex (not naive substring).
+    If several secondary rows tie: prefer secondary row whose normalized key equals the primary key;
+    else lowest original secondary row index. Warnings are recorded; output row count equals D1.
     """
     warnings: list[str] = []
+    multi_warned: set[str] = set()
     if key_left not in d1.columns:
         raise ValueError(f"Key column '{key_left}' not found in primary dataset.")
     if key_right not in d2.columns:
@@ -167,25 +190,21 @@ def merge_primary_with_secondary(
     rows_in_dup_groups = sum(cnt_d2[k] for k in dup_keys_d2)
     if n_secondary_dup_groups:
         warnings.append(
-            f'Secondary dataset: {n_secondary_dup_groups} merge key value(s) repeat — all {rows_in_dup_groups} '
-            'secondary rows are kept; see FinOps_Merge_* flag columns (output may have more rows than primary).'
+            f'Secondary dataset: {n_secondary_dup_groups} normalized merge key value(s) repeat — '
+            f'{rows_in_dup_groups} rows; only the first row per key is merged (see FinOps_Merge_* flags).'
         )
 
-    exact_lists: dict[str, list[pd.Series]] = defaultdict(list)
-    for _, r in d2.iterrows():
-        nk2 = _norm_key_value(r[key_right])
-        if nk2 is not None:
-            exact_lists[nk2].append(r)
+    exact_lists: dict[str, list[tuple[int, pd.Series]]] = defaultdict(list)
+    core_to_rows: dict[str, list[tuple[int, pd.Series, str]]] = defaultdict(list)
 
-    def _fuzzy_matches(primary_nk: str) -> list[pd.Series]:
-        out: list[pd.Series] = []
-        for _, br in d2.iterrows():
-            brk = _norm_key_value(br[key_right])
-            if brk is None:
-                continue
-            if _fuzzy_keys_match(primary_nk, brk):
-                out.append(br)
-        return out
+    for idx, (_, br) in enumerate(d2.iterrows()):
+        nk2 = _norm_key_value(br[key_right])
+        if nk2 is None:
+            continue
+        exact_lists[nk2].append((idx, br))
+        core2 = _canonical_core_for_key(nk2, warnings, multi_warned)
+        if core2 is not None:
+            core_to_rows[core2].append((idx, br, nk2))
 
     dup_primary_norm = {
         k
@@ -203,51 +222,86 @@ def merge_primary_with_secondary(
     out_cols = list(d1.columns) + extra_cols + [fname_sec, fname_rep, fname_pp]
     rows: list[dict] = []
     unmatched = 0
-    fuzzy_primary_hits = 0
+    extracted_hits = 0
+
+    def _pick_one_match(
+        nk: str | None,
+    ) -> tuple[pd.Series | None, bool, str, bool]:
+        """
+        Returns (secondary_row_or_none, duplicate_secondary_suppressed, replica_label, matched_via_core_id).
+        """
+        if nk is None:
+            return (None, False, '', False)
+        if nk in exact_lists:
+            cands = sorted(exact_lists[nk], key=lambda t: t[0])
+            if len(cands) > 1:
+                warnings.append(
+                    f'Multiple secondary rows share exact merge key {nk!r} — using first row (index {cands[0][0]}).'
+                )
+                logger.warning('Merge: duplicate secondary exact keys; using first row.')
+            return (cands[0][1], len(cands) > 1, f'1/{len(cands)}', False)
+
+        core1 = _canonical_core_for_key(nk, warnings, multi_warned)
+        if core1 is None or core1 not in core_to_rows:
+            return (None, False, '', False)
+        cands = core_to_rows[core1]
+        # Prefer secondary rows whose full normalized key is exactly the core (e.g. a1011 vs asas_a1011_x).
+        bare_first = sorted([(i, r, n2) for i, r, n2 in cands if n2 == core1], key=lambda t: t[0])
+        if bare_first:
+            chosen = bare_first[0]
+            if len(bare_first) > 1:
+                warnings.append(
+                    f'Multiple secondary rows match core id {core1!r} as exact key — '
+                    f'using first row (index {chosen[0]}).'
+                )
+                logger.warning('Merge: multiple bare-id secondary rows for same core; using first.')
+            return (chosen[1], len(bare_first) > 1, f'1/{len(bare_first)}', True)
+
+        sorted_c = sorted(cands, key=lambda t: t[0])
+        chosen = sorted_c[0]
+        if len(sorted_c) > 1:
+            warnings.append(
+                f'Multiple secondary rows share extracted core id {core1!r} — using first row (index {chosen[0]}).'
+            )
+            logger.warning('Merge: multiple secondary rows for extracted core; using first.')
+        return (chosen[1], len(sorted_c) > 1, f'1/{len(sorted_c)}', True)
 
     for _, r1 in d1.iterrows():
         nk = _norm_key_value(r1[key_left])
         primary_dup = bool(nk is not None and nk in dup_primary_norm)
-        matches = list(exact_lists.get(nk, [])) if nk is not None else []
-        if nk is not None and not matches:
-            matches = _fuzzy_matches(nk)
-            if matches:
-                fuzzy_primary_hits += 1
+        r2, sec_multi, rep_label, via_core = _pick_one_match(nk)
+        if via_core and r2 is not None:
+            extracted_hits += 1
 
-        if nk is not None and not matches:
+        if nk is not None and r2 is None:
             unmatched += 1
 
-        def _emit_one(r2: pd.Series | None, sec_multi: bool, rep_label: str) -> None:
+        def _emit_one(r2b: pd.Series | None, sec_m: bool, rep_lbl: str) -> None:
             row: dict = {}
             for c in d1.columns:
                 v1 = r1[c]
                 if not _is_empty_cell(v1):
                     row[c] = v1
-                elif r2 is not None and c in d2.columns:
-                    row[c] = r2[c]
+                elif r2b is not None and c in d2.columns:
+                    row[c] = r2b[c]
                 else:
                     row[c] = v1
             for c in extra_cols:
-                row[c] = r2[c] if r2 is not None else pd.NA
-            row[fname_sec] = 'Yes' if sec_multi else 'No'
-            row[fname_rep] = rep_label
+                row[c] = r2b[c] if r2b is not None else pd.NA
+            row[fname_sec] = 'Yes' if sec_m else 'No'
+            row[fname_rep] = rep_lbl
             row[fname_pp] = 'Yes' if primary_dup else 'No'
             rows.append(row)
 
-        if not matches:
-            _emit_one(None, False, '')
-        elif len(matches) == 1:
-            _emit_one(matches[0], False, '')
-        else:
-            for j, r2 in enumerate(matches):
-                _emit_one(r2, True, f'{j + 1}/{len(matches)}')
+        _emit_one(r2, sec_multi, rep_label)
 
-    if fuzzy_primary_hits:
+    if extracted_hits:
         warnings.append(
-            f'Matched {fuzzy_primary_hits} primary row(s) using fuzzy key '
-            '(short code inside longer secondary key); verify joins are correct.'
+            f'Matched {extracted_hits} primary row(s) using extracted core id '
+            r'(pattern [a-z] + ≥3 digits, no trailing digit); verify joins.'
         )
     if unmatched:
         warnings.append(f'Primary rows with no secondary match on key: {unmatched} (extra columns left blank).')
+
     out = pd.DataFrame(rows, columns=out_cols)
     return (out, warnings)

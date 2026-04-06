@@ -10,6 +10,41 @@ _MERGE_FLAGS = [
 ]
 
 
+class TestCoreIdMergeValidation(unittest.TestCase):
+    """Strict core id [a-z][0-9]{3,} — no partial id false positives."""
+
+    def test_exact_core_match(self) -> None:
+        d1 = pd.DataFrame({'k': ['a1011'], 'A': [1]})
+        d2 = pd.DataFrame({'k': ['a1011'], 'Spend': [99.0]})
+        out, w = merge_primary_with_secondary(d1, d2, 'k', 'k')
+        self.assertEqual(float(out.iloc[0]['Spend']), 99.0)
+        self.assertFalse(any('extracted core' in x.lower() for x in w))
+
+    def test_embedded_core_in_secondary(self) -> None:
+        d1 = pd.DataFrame({'k': ['a1011'], 'A': [1]})
+        d2 = pd.DataFrame({'k': ['asas_a1011_asasasaa'], 'Spend': [42.0]})
+        out, _ = merge_primary_with_secondary(d1, d2, 'k', 'k')
+        self.assertEqual(float(out.iloc[0]['Spend']), 42.0)
+
+    def test_embedded_primary_embedded_secondary(self) -> None:
+        d1 = pd.DataFrame({'k': ['prefix_a1011_suffix'], 'A': [1]})
+        d2 = pd.DataFrame({'k': ['asdsdas_asa1011'], 'Spend': [7.0]})
+        out, _ = merge_primary_with_secondary(d1, d2, 'k', 'k')
+        self.assertEqual(float(out.iloc[0]['Spend']), 7.0)
+
+    def test_no_match_shorter_partial_core(self) -> None:
+        d1 = pd.DataFrame({'k': ['a1011'], 'A': [1]})
+        d2 = pd.DataFrame({'k': ['a101'], 'Spend': [1.0]})
+        out, _ = merge_primary_with_secondary(d1, d2, 'k', 'k')
+        self.assertTrue(pd.isna(out.iloc[0]['Spend']))
+
+    def test_no_match_different_letter_prefix(self) -> None:
+        d1 = pd.DataFrame({'k': ['a1011'], 'A': [1]})
+        d2 = pd.DataFrame({'k': ['b1011'], 'Spend': [1.0]})
+        out, _ = merge_primary_with_secondary(d1, d2, 'k', 'k')
+        self.assertTrue(pd.isna(out.iloc[0]['Spend']))
+
+
 class TestSuggestKeyPairs(unittest.TestCase):
     def test_same_name_resource_id_first(self):
         c1 = ['resource_id', 'Instance', 'OS']
@@ -65,15 +100,15 @@ class TestMergePrimaryWithSecondary(unittest.TestCase):
         self.assertEqual(float(out.loc[out['resource_id'] == 'r1', 'Spend'].iloc[0]), 10.0)
         self.assertTrue(pd.isna(out.loc[out['resource_id'] == 'r2', 'Spend'].iloc[0]))
 
-    def test_duplicate_d2_keys_includes_all_rows(self):
+    def test_duplicate_d2_keys_uses_first_row_only(self):
         d1 = pd.DataFrame({'id': ['x'], 'Instance': ['m5.large']})
         d2 = pd.DataFrame({'id': ['x', 'x'], 'Spend': [1.0, 2.0]})
         out, w = merge_primary_with_secondary(d1, d2, 'id', 'id')
-        self.assertEqual(len(out), 2)
-        self.assertEqual(sorted(float(out.iloc[i]['Spend']) for i in range(2)), [1.0, 2.0])
-        self.assertTrue((out['FinOps_Merge_DuplicateSecondaryRows'] == 'Yes').all())
-        self.assertEqual(set(out['FinOps_Merge_SecondaryRowGroupIndex']), {'1/2', '2/2'})
-        self.assertTrue(any('secondary' in x.lower() and 'repeat' in x.lower() for x in w))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(float(out.iloc[0]['Spend']), 1.0)
+        self.assertEqual(out.iloc[0]['FinOps_Merge_DuplicateSecondaryRows'], 'Yes')
+        self.assertEqual(out.iloc[0]['FinOps_Merge_SecondaryRowGroupIndex'], '1/2')
+        self.assertTrue(any('first row' in x.lower() for x in w))
 
     def test_missing_instance_in_d2_does_not_drop_d1_columns(self):
         d1 = pd.DataFrame({'arn': ['arn:1'], 'Instance': ['m5.large'], 'OS': ['linux']})
@@ -88,7 +123,7 @@ class TestMergePrimaryWithSecondary(unittest.TestCase):
         d2 = pd.DataFrame({'application_type': ['asdsd_asa_a1105'], 'Spend': [12.5]})
         out, w = merge_primary_with_secondary(d1, d2, 'app_code', 'application_type')
         self.assertEqual(float(out.iloc[0]['Spend']), 12.5)
-        self.assertTrue(any('fuzzy' in x.lower() for x in w))
+        self.assertTrue(any('extracted core' in x.lower() for x in w))
 
     def test_case_insensitive_exact_key(self):
         d1 = pd.DataFrame({'k': ['A1105'], 'x': [1]})
