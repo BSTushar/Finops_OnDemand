@@ -94,6 +94,7 @@ class TestProcessorStrict(unittest.TestCase):
         self.assertIsNotNone(alt1)
         self.assertNotEqual(alt1, 'N/A')
         self.assertEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
+        self.assertEqual(out['Discount %'].iloc[0], 'N/A')
         self.assertEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')
         self.assertEqual(out['Alt1 Savings %'].iloc[0], 'N/A')
 

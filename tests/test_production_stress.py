@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 from data_loader import ColumnBinding, analyze_load, finalize_binding
 from instance_api import canonicalize_instance_api_name
 from pricing_engine import COST_DISCLAIMER_TEXT, DEFAULT_REGION, PRICE_CACHE, get_price, get_rds_hourly
-from processor import INSERT_COLS, apply_na_fill, process
+from processor import INSERT_COLS, NO_DISCOUNT, apply_na_fill, process
 from rds_mysql_sa_prices import RDS_MYSQL_SA_HOURLY
 from rds_recommender import get_rds_recommendations
 
@@ -58,6 +58,35 @@ class TestCostFormula(unittest.TestCase):
         else:
             pct = round((float(p_cur) - float(p_alt)) / float(p_cur) * 100, 1)
             self.assertEqual(float(out['Alt1 Savings %'].iloc[0]), pct)
+
+
+class TestDiscountPct(unittest.TestCase):
+    """Discount % = ((list hourly) - actual) / (list hourly) * 100; independent of Alt savings."""
+
+    def test_manual_example_107_vs_096(self):
+        df = pd.DataFrame({'API Name': ['m5.large'], 'OS': ['linux'], 'Spend': [0.096]})
+        b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
+        self.assertAlmostEqual(float(out['Current Price ($/hr)'].iloc[0]), 0.107, places=4)
+        self.assertEqual(float(out['Actual Cost ($)'].iloc[0]), 0.096)
+        self.assertEqual(float(out['Discount %'].iloc[0]), 10.3)
+
+    def test_no_discount_when_actual_ge_list(self):
+        df = pd.DataFrame({'API Name': ['m5.large'], 'OS': ['linux'], 'Spend': [0.2]})
+        b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
+        self.assertEqual(out['Discount %'].iloc[0], NO_DISCOUNT)
+
+    def test_na_invalid_instance_no_list_price(self):
+        df = pd.DataFrame({'API Name': ['not-valid'], 'OS': ['linux'], 'Spend': [0.096]})
+        b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
+        self.assertEqual(out['Discount %'].iloc[0], 'N/A')
+
+    def test_discount_after_actual_cost_in_insert_cols(self):
+        self.assertEqual(INSERT_COLS[1], 'Actual Cost ($)')
+        self.assertEqual(INSERT_COLS[2], 'Discount %')
+        self.assertEqual(INSERT_COLS[3], 'Current Price ($/hr)')
 
 
 class TestColumnIntegrityAndInsertion(unittest.TestCase):
@@ -151,6 +180,7 @@ class TestExtremeEdges(unittest.TestCase):
         lr = finalize_binding(analyze_load(df, []), 'Instance', 'OS', None)
         out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1'))
         self.assertEqual(out['Actual Cost ($)'].iloc[0], 'N/A')
+        self.assertEqual(out['Discount %'].iloc[0], 'N/A')
         self.assertNotEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
         self.assertNotEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')
 
@@ -209,11 +239,12 @@ class TestPreshipServiceSmoke(unittest.TestCase):
     def test_ec2_mode(self):
         out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='ec2', cpu_filter='both'))
         self.assertEqual(
-            list(out.columns[:8]),
+            list(out.columns[:9]),
             [
                 'Instance',
                 'Pricing OS',
                 'Actual Cost ($)',
+                'Discount %',
                 'Current Price ($/hr)',
                 'Alt1 Instance',
                 'Alt1 Price ($/hr)',

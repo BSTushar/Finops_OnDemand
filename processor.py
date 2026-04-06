@@ -18,6 +18,7 @@ ServiceMode = Literal['ec2', 'rds', 'both']
 INSERT_COLS: list[str] = [
     'Pricing OS',
     'Actual Cost ($)',
+    'Discount %',
     'Current Price ($/hr)',
     'Alt1 Instance',
     'Alt1 Price ($/hr)',
@@ -28,6 +29,7 @@ INSERT_COLS: list[str] = [
 ]
 NA = 'N/A'
 NO_SAVINGS = 'No Savings'
+NO_DISCOUNT = 'No Discount'
 ALT2_NO_DISTINCT = 'N/A (No distinct alternative)'
 # Windows on EC2 does not offer Graviton (Arm) in the same way as Linux; block Graviton alts.
 ALT2_INCOMPATIBLE_OS = 'N/A (No compatible alternative)'
@@ -140,6 +142,33 @@ def _savings_from_hourly(current_hr: float | None, alt_hr: float | None) -> floa
         return NO_SAVINGS
     pct = round((current_hr - alt_hr) / current_hr * 100, 1)
     return max(0.0, pct)
+
+
+def _discount_pct_vs_list(act: object, list_hourly: object) -> float | str:
+    """
+    Discount % = ((Current list price/hr) - Actual cost) / (Current list price/hr) * 100.
+    Both must be positive finite; actual >= list → No Discount; else 1 decimal.
+    """
+    a = _to_float(act)
+    if a is None or not math.isfinite(a) or a <= 0:
+        a = None
+    c = None
+    if list_hourly is not None:
+        try:
+            cf = float(list_hourly)
+            if math.isfinite(cf) and cf > 0:
+                c = cf
+        except (TypeError, ValueError):
+            pass
+    if a is None or c is None:
+        return NA
+    if a >= c:
+        return NO_DISCOUNT
+    try:
+        pct = round((c - a) / c * 100.0, 1)
+        return pct if math.isfinite(pct) else NA
+    except (ArithmeticError, ZeroDivisionError, TypeError, ValueError):
+        return NA
 
 def _to_float(v) -> float | None:
     if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -318,22 +347,23 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             pj = cur_p[j]
             p_txt = f'{pj:.6f}' if isinstance(pj, (int, float)) and math.isfinite(float(pj)) else 'N/A'
             print(f'[FinOps DEBUG] {inst_j} {os_j} {PRICING_LOOKUP_REGION} {p_txt}', flush=True)
+    discount_out = [_discount_pct_vs_list(act_out[i], cur_p[i]) for i in range(n)]
     left = work.iloc[:, :ins_idx + 1].copy()
     right = work.iloc[:, ins_idx + 1:].copy()
-    mid = pd.DataFrame(
-        {
-            INSERT_COLS[0]: pricing_os_out,
-            INSERT_COLS[1]: act_out,
-            INSERT_COLS[2]: cur_p,
-            INSERT_COLS[3]: a1i,
-            INSERT_COLS[4]: a1p,
-            INSERT_COLS[5]: a1s,
-            INSERT_COLS[6]: a2i,
-            INSERT_COLS[7]: a2p,
-            INSERT_COLS[8]: a2s,
-        },
-        index=work.index,
-    )
+    _mid_lists = [
+        pricing_os_out,
+        act_out,
+        discount_out,
+        cur_p,
+        a1i,
+        a1p,
+        a1s,
+        a2i,
+        a2p,
+        a2s,
+    ]
+    assert len(_mid_lists) == len(INSERT_COLS), 'INSERT_COLS / mid row mismatch'
+    mid = pd.DataFrame(dict(zip(INSERT_COLS, _mid_lists)), index=work.index)
     out = pd.concat([left, mid, right], axis=1)
     assert len(out) == len(work), 'Row count changed'
     assert len(out.columns) == len(work.columns) + len(INSERT_COLS), 'Column count wrong'

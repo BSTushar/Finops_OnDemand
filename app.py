@@ -97,6 +97,36 @@ def _format_display_money_cell(v: object, *, hourly: bool) -> str:
     return f'${x:,.2f}'
 
 
+def _format_display_discount_pct_cell(v: object) -> str:
+    """Table display for Discount % (N/A, No Discount, or n.n%)."""
+    if v is None:
+        return 'N/A'
+    try:
+        if pd.isna(v):
+            return 'N/A'
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, str):
+        t = v.strip()
+        if not t or t.upper() == 'N/A' or t.lower() in ('nan', 'none'):
+            return 'N/A'
+        if t == 'No Discount':
+            return 'No Discount'
+        if t.endswith('%'):
+            return t
+        try:
+            return f'{float(t.replace("%", "").replace(",", "").strip()):.1f}%'
+        except ValueError:
+            return t
+    try:
+        x = float(v)
+        if math.isfinite(x):
+            return f'{x:.1f}%'
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+
 def _format_display_savings_cell(v: object) -> str:
     """Append % for numeric savings; keep N/A and No Savings."""
     if v is None:
@@ -138,6 +168,8 @@ def _enriched_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
         cn = str(name)
         if cn == 'Actual Cost ($)':
             vals = [_format_display_money_cell(x, hourly=False) for x in ser]
+        elif cn == 'Discount %':
+            vals = [_format_display_discount_pct_cell(x) for x in ser]
         elif 'Price ($/hr)' in cn:
             vals = [_format_display_money_cell(x, hourly=True) for x in ser]
         elif 'Savings %' in cn:
@@ -1085,7 +1117,19 @@ def _old_generation_detail_table(df: pd.DataFrame, inst_col: str | None) -> pd.D
     """Rows in the current view whose instance cell matches the older-gen family heuristic (same as red KPI)."""
     if not inst_col or inst_col not in df.columns or df.empty:
         return pd.DataFrame()
-    extra = [c for c in ('Pricing OS', 'Current Price ($/hr)', 'Alt1 Instance', 'Alt1 Savings %', 'Alt2 Instance', 'Alt2 Savings %') if c in df.columns]
+    extra = [
+        c
+        for c in (
+            'Pricing OS',
+            'Discount %',
+            'Current Price ($/hr)',
+            'Alt1 Instance',
+            'Alt1 Savings %',
+            'Alt2 Instance',
+            'Alt2 Savings %',
+        )
+        if c in df.columns
+    ]
     cols = [inst_col] + [c for c in extra if c != inst_col]
     sub = df.loc[:, cols].copy()
     mask = sub[inst_col].map(_is_old_gen_instance_cell)

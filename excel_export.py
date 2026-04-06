@@ -104,7 +104,7 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
             c.fill = hdr_fill
             c.border = bdr
             c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        sav_cols = [c for c in safe_df.columns if 'Savings %' in c]
+        sav_cols = [c for c in safe_df.columns if 'Savings %' in c or c == 'Discount %']
         price_cols = [c for c in safe_df.columns if ('Cost ($)' in c or '$/hr' in c)]
         green_fill = PatternFill('solid', fgColor='D1FAE5')
         amber_fill = PatternFill('solid', fgColor='FEF3C7')
