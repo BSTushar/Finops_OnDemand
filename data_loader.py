@@ -13,6 +13,7 @@ _VALUE_SAMPLE_CAP = 2000
 _MIN_AUTO_CONF = 0.48
 _TIE_BAND = 0.09
 
+# Default suits typical spreadsheets; wide CUR-style CSVs (10k–100k+ rows) often need FINOPS_MAX_UPLOAD_BYTES.
 _DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
