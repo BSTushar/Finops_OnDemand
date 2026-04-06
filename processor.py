@@ -11,7 +11,7 @@ from instance_api import canonicalize_instance_api_name
 from os_resolve import cell_matches_valid_os_pattern, classify_os_kind
 from pricing_engine import DEFAULT_REGION, PRICING_LOOKUP_REGION, get_price, get_rds_hourly
 from pricing_normalize import LINUX_FALLBACK_LABEL, normalize_instance_string, normalize_os_engine_key, normalize_pricing_os_label
-from recommender import CPUFilterMode, get_recommendations
+from recommender import CPUFilterMode, get_recommendations, is_graviton_family
 from rds_recommender import get_rds_recommendations
 logger = logging.getLogger(__name__)
 ServiceMode = Literal['ec2', 'rds', 'both']
@@ -29,6 +29,9 @@ INSERT_COLS: list[str] = [
 NA = 'N/A'
 NO_SAVINGS = 'No Savings'
 ALT2_NO_DISTINCT = 'N/A (No distinct alternative)'
+# Windows on EC2 does not offer Graviton (Arm) in the same way as Linux; block Graviton alts.
+ALT2_INCOMPATIBLE_OS = 'N/A (No compatible alternative)'
+_PRICING_WINDOWS_LABEL = 'Windows'
 
 def _first_col_index(cols: list, name: str) -> int:
     for i, c in enumerate(cols):
@@ -97,7 +100,8 @@ def _hourly_cur(inst: str, os_engine: str, backend: Literal['ec2', 'rds']) -> fl
     if not inst_key:
         return None
     if backend == 'rds':
-        return get_rds_hourly(inst_key, region=PRICING_LOOKUP_REGION, os=os_engine)
+        # Bundled RDS table is MySQL Single-AZ class rates (Linux-oriented); use linux key for lookup.
+        return get_rds_hourly(inst_key, region=PRICING_LOOKUP_REGION, os='linux')
     return get_price(inst_key, region=PRICING_LOOKUP_REGION, os=os_engine)
 
 
@@ -105,9 +109,24 @@ def _hourly_alt(alt: str | None, os_engine: str, backend: Literal['ec2', 'rds'])
     if not alt or not isinstance(alt, str):
         return None
     a = str(alt).strip()
-    if a in (NA, ALT2_NO_DISTINCT) or not a or a.lower() in ('nan', 'none'):
+    if a in (NA, ALT2_NO_DISTINCT, ALT2_INCOMPATIBLE_OS) or not a or a.lower() in ('nan', 'none'):
         return None
     return _hourly_cur(normalize_instance_string(alt), os_engine, backend)
+
+
+def _family_token_from_instance(api_name: str) -> str:
+    s = normalize_instance_string(api_name)
+    if not s:
+        return ''
+    body = s[3:] if s.startswith('db.') else s
+    if '.' not in body:
+        return ''
+    return body.split('.', 1)[0]
+
+
+def _is_graviton_instance_api(api_name: str) -> bool:
+    fam = _family_token_from_instance(api_name)
+    return bool(fam) and is_graviton_family(fam)
 
 
 def _savings_from_hourly(current_hr: float | None, alt_hr: float | None) -> float | str:
@@ -245,6 +264,13 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             rec = get_rds_recommendations(inst, cpu_filter=cpu) if backend == 'rds' else get_recommendations(inst, cpu_filter=cpu)
             alt1 = rec.get('alt1')
             alt2 = rec.get('alt2')
+            win_blocked_graviton_alt2 = False
+            if pricing_os_out[i] == _PRICING_WINDOWS_LABEL:
+                if alt1 and _is_graviton_instance_api(alt1):
+                    alt1 = None
+                if alt2 and _is_graviton_instance_api(alt2):
+                    win_blocked_graviton_alt2 = True
+                    alt2 = None
             if alt1 and alt2 and (alt1 == alt2):
                 alt2 = None
             p_cur = _hourly_cur(inst, os_engine, backend)
@@ -254,6 +280,8 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             a1i[i] = alt1 if alt1 is not None else NA
             if alt2 is not None:
                 a2i[i] = alt2
+            elif win_blocked_graviton_alt2:
+                a2i[i] = ALT2_INCOMPATIBLE_OS
             elif alt1 is not None:
                 a2i[i] = ALT2_NO_DISTINCT
             else:

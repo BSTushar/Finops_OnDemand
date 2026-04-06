@@ -2,6 +2,7 @@ from __future__ import annotations
 import html
 import inspect
 import logging
+import math
 import re
 import pandas as pd
 import streamlit as st
@@ -49,21 +50,101 @@ def _dataframe_for_streamlit_arrow(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _cell_display_generic(v: object) -> str:
+    if v is None:
+        return ''
+    try:
+        if pd.isna(v):
+            return ''
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, bytes):
+        try:
+            return v.decode('utf-8', errors='replace')
+        except Exception:
+            return str(v)
+    return str(v)
+
+
+def _format_display_money_cell(v: object, *, hourly: bool) -> str:
+    """Prefix $ for numeric hourly (4 dp) or cost (2 dp); pass through N/A."""
+    if v is None:
+        return 'N/A'
+    try:
+        if pd.isna(v):
+            return 'N/A'
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, str):
+        t = v.strip()
+        if not t or t.upper() == 'N/A' or t.lower() in ('nan', 'none'):
+            return 'N/A'
+        if t.startswith('$'):
+            return t
+        try:
+            x = float(t.replace(',', ''))
+        except ValueError:
+            return t
+    else:
+        try:
+            x = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return str(v)
+    if not math.isfinite(x):
+        return 'N/A'
+    if hourly:
+        return f'${x:.4f}'
+    return f'${x:,.2f}'
+
+
+def _format_display_savings_cell(v: object) -> str:
+    """Append % for numeric savings; keep N/A and No Savings."""
+    if v is None:
+        return 'N/A'
+    try:
+        if pd.isna(v):
+            return 'N/A'
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, str):
+        t = v.strip()
+        if not t or t.upper() == 'N/A' or t.lower() in ('nan', 'none'):
+            return 'N/A'
+        if t == 'No Savings':
+            return 'No Savings'
+        if t.endswith('%'):
+            return t
+        try:
+            return f'{float(t.replace("%", "").replace(",", "").strip()):.1f}%'
+        except ValueError:
+            return t
+    try:
+        x = float(v)  # type: ignore[arg-type]
+        if math.isfinite(x):
+            return f'{x:.1f}%'
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+
 def _enriched_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    """Display-only string view for Streamlit (never mutates enriched export df). Duplicate-safe by position."""
-    df_display = df.copy()
-    if df_display.empty:
-        return df_display
+    """Display-only string view for Streamlit: $ on price/cost columns, % on savings columns."""
+    if df.empty:
+        return df.copy()
     parts: list[pd.Series] = []
-    for j in range(df_display.shape[1]):
-        parts.append(
-            pd.Series(
-                df_display.iloc[:, j].astype(str).values,
-                index=df_display.index,
-                name=df_display.columns[j],
-                dtype=str,
-            )
-        )
+    for j in range(df.shape[1]):
+        name = df.columns[j]
+        ser = df.iloc[:, j]
+        cn = str(name)
+        if cn == 'Actual Cost ($)':
+            vals = [_format_display_money_cell(x, hourly=False) for x in ser]
+        elif 'Price ($/hr)' in cn:
+            vals = [_format_display_money_cell(x, hourly=True) for x in ser]
+        elif 'Savings %' in cn:
+            vals = [_format_display_savings_cell(x) for x in ser]
+        else:
+            vals = [_cell_display_generic(x) for x in ser]
+        parts.append(pd.Series(vals, index=df.index, name=name, dtype=str))
     return pd.concat(parts, axis=1)
 
 
@@ -1345,7 +1426,7 @@ if df_out is not None:
 
         df_display = _enriched_table_for_display(view)
         st.markdown('<div id="finops-enriched-df-anchor"></div>', unsafe_allow_html=True)
-        st.caption('Table view uses string cells for stable rendering; export files use typed enrichment data.')
+        st.caption('Table shows **$** for cost/hourly columns and **%** for savings; exports stay numeric-friendly.')
         st.dataframe(df_display, **_ui_stretch_kwargs(), hide_index=True, height=520)
         export_df = apply_na_fill(df_out)
         reg_id = st.session_state.get('region_id', DEFAULT_REGION)
