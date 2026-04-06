@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from rds_mysql_sa_prices import RDS_MYSQL_SA_HOURLY
 from ec2_ondemand_public import EC2_ONDEMAND_BY_REGION_OS, EC2_ONDEMAND_PUBLIC_AS_OF
 
@@ -12,9 +12,12 @@ def _manifest_as_datetime(iso_z: str) -> datetime:
     if s.endswith('Z'):
         s = s[:-1] + '+00:00'
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc)
 
 
 CACHE_METADATA: dict = {
@@ -85,18 +88,25 @@ def cost_disclaimer_text(pricing_region_id: str) -> str:
 COST_DISCLAIMER_TEXT: str = cost_disclaimer_text(DEFAULT_REGION)
 
 
+def _last_updated_utc() -> datetime:
+    lu = CACHE_METADATA['last_updated']
+    if lu.tzinfo is None:
+        return lu.replace(tzinfo=timezone.utc)
+    return lu.astimezone(timezone.utc)
+
+
 def format_pricing_snapshot_line(pricing_region_id: str) -> str:
     rid = (pricing_region_id or DEFAULT_REGION).strip().lower()
-    as_of = CACHE_METADATA['last_updated'].strftime('%Y-%m-%d')
+    as_of = _last_updated_utc().strftime('%Y-%m-%d')
     return f'Pricing Snapshot: {rid} | Source: {PRICING_SOURCE_LABEL} | EC2 as of: {as_of} (manifest {EC2_ONDEMAND_PUBLIC_AS_OF})'
 
 
 def cache_is_stale() -> bool:
-    return datetime.now() - CACHE_METADATA['last_updated'] > timedelta(days=CACHE_TTL_DAYS)
+    return datetime.now(timezone.utc) - _last_updated_utc() > timedelta(days=CACHE_TTL_DAYS)
 
 
 def cache_age_days() -> int:
-    return (datetime.now() - CACHE_METADATA['last_updated']).days
+    return (datetime.now(timezone.utc) - _last_updated_utc()).days
 
 
 def _normalize_os_key(os: str) -> str | None:

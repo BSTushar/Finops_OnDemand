@@ -4,6 +4,7 @@ import pandas as pd
 from instance_api import canonicalize_instance_api_name
 from pricing_engine import get_price, get_rds_hourly
 from data_loader import ColumnBinding
+from excel_export import sanitize_formula_injection_dataframe
 from processor import INSERT_COLS, apply_na_fill, process
 
 
@@ -44,6 +45,20 @@ class TestStrictPricing(unittest.TestCase):
         self.assertIsNotNone(get_rds_hourly('db.m5.large', region='eu-west-1', os='linux'))
 
 
+class TestExportSafety(unittest.TestCase):
+
+    def test_formula_injection_prefix_on_export_strings(self):
+        df = pd.DataFrame({'a': ['=1+1', '+evil', '-bad', '@ref', 'ok', 3.0, True]})
+        out = sanitize_formula_injection_dataframe(df)
+        self.assertTrue(str(out['a'].iloc[0]).startswith("'"))
+        self.assertTrue(str(out['a'].iloc[1]).startswith("'"))
+        self.assertTrue(str(out['a'].iloc[2]).startswith("'"))
+        self.assertTrue(str(out['a'].iloc[3]).startswith("'"))
+        self.assertEqual(out['a'].iloc[4], 'ok')
+        self.assertEqual(out['a'].iloc[5], 3.0)
+        self.assertEqual(out['a'].iloc[6], True)
+
+
 class TestProcessorStrict(unittest.TestCase):
 
     def test_reserved_enrichment_column_name_rejected(self):
@@ -53,22 +68,22 @@ class TestProcessorStrict(unittest.TestCase):
             process(df, b, region='eu-west-1')
         self.assertIn('reserved', str(ctx.exception).lower())
 
-    def test_duplicate_input_column_names_use_first_for_binding(self):
+    def test_duplicate_input_column_names_rejected(self):
         df = pd.DataFrame(
             [['m5.large', 'm5.large', 'linux']],
             columns=['Instance', 'Instance', 'OS'],
         )
         b = ColumnBinding(instance='Instance', os='OS', actual_cost=None)
-        out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
-        self.assertEqual(len(out), 1)
-        self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+        with self.assertRaises(ValueError) as ctx:
+            process(df, b, region='eu-west-1', service='both', cpu_filter='both')
+        self.assertIn('duplicate', str(ctx.exception).lower())
 
-    def test_duplicate_cost_column_names_use_first_occurrence(self):
+    def test_duplicate_cost_column_names_rejected(self):
         df = pd.DataFrame([['m5.large', 'linux', 10.0, 99.0]], columns=['API Name', 'OS', 'Amt', 'Amt'])
         b = ColumnBinding(instance='API Name', os='OS', actual_cost='Amt')
-        out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
-        self.assertEqual(len(out), 1)
-        self.assertEqual(float(out['Actual Cost ($)'].iloc[0]), 10.0)
+        with self.assertRaises(ValueError) as ctx:
+            process(df, b, region='eu-west-1', service='both', cpu_filter='both')
+        self.assertIn('duplicate', str(ctx.exception).lower())
 
     def test_missing_rds_price_recommendations_without_cost(self):
         df = pd.DataFrame({'API Name': ['db.c5.2xlarge'], 'OS': ['linux'], 'Spend': [100.0]})

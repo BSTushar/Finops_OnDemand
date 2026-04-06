@@ -2,6 +2,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 import re
 import pandas as pd
+from data_loader import require_unique_column_names
 
 MERGE_KEY_HINTS: frozenset[str] = frozenset(
     {
@@ -155,6 +156,8 @@ def merge_primary_with_secondary(
         raise ValueError(f"Key column '{key_left}' not found in primary dataset.")
     if key_right not in d2.columns:
         raise ValueError(f"Key column '{key_right}' not found in secondary dataset.")
+    require_unique_column_names(d1.columns)
+    require_unique_column_names(d2.columns)
     d1 = d1.copy()
     d2 = d2.copy()
 

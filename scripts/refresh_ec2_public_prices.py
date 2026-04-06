@@ -3,6 +3,9 @@
 Run from repo root: python scripts/refresh_ec2_public_prices.py
 
 Writes ec2_ondemand_public.py (no third-party deps). Requires outbound HTTPS.
+
+Not imported by the Streamlit app — offline maintainer workflow only. Deployed FinOps instances must not
+execute this script from the serving tier; refresh bundles on a build/ops host, then redeploy artifacts.
 """
 from __future__ import annotations
 

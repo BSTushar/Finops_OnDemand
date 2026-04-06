@@ -1,6 +1,7 @@
 from __future__ import annotations
 import io
 import math
+import os
 import re
 import statistics
 from dataclasses import dataclass, field
@@ -11,6 +12,39 @@ from os_resolve import cell_matches_valid_os_pattern
 _VALUE_SAMPLE_CAP = 2000
 _MIN_AUTO_CONF = 0.48
 _TIE_BAND = 0.09
+
+_DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+def max_upload_bytes() -> int:
+    raw = (os.environ.get('FINOPS_MAX_UPLOAD_BYTES') or '').strip()
+    if not raw:
+        return _DEFAULT_MAX_UPLOAD_BYTES
+    try:
+        n = int(raw, 10)
+        return max(1024 * 1024, min(n, 512 * 1024 * 1024))
+    except ValueError:
+        return _DEFAULT_MAX_UPLOAD_BYTES
+
+
+def require_unique_column_names(columns) -> None:
+    """Reject duplicate headers — pandas column access is ambiguous; enrichment requires stable positions."""
+    cols = list(columns)
+    if len(cols) == len(set(cols)):
+        return
+    raise ValueError(
+        'Duplicate column names detected. Each column must have a unique name. '
+        'Rename the duplicates in your source file and re-upload.'
+    )
+
+
+def _reject_oversized(raw: bytes, filename: str) -> None:
+    limit = max_upload_bytes()
+    if len(raw) > limit:
+        raise ValueError(
+            f"File exceeds maximum size ({limit // (1024 * 1024)} MB). "
+            'Split the dataset or increase FINOPS_MAX_UPLOAD_BYTES for trusted deployments only.'
+        )
 
 def _norm_header(name: str) -> str:
     s = str(name).strip().lower()
@@ -264,7 +298,7 @@ class LoadResult:
         return LoadResult(df=self.df, warnings=self.warnings.copy(), instance_candidates=self.instance_candidates, os_candidates=self.os_candidates, cost_candidates=self.cost_candidates, binding=b, needs_instance_pick=False, needs_os_pick=False, needs_cost_pick=False)
 
 def _parse_dataframe(raw_bytes: bytes, ext: str) -> pd.DataFrame:
-    if ext in ('xlsx', 'xls', 'xlsm'):
+    if ext in ('xlsx', 'xls'):
         return pd.read_excel(io.BytesIO(raw_bytes), engine='openpyxl', dtype=object, keep_default_na=False)
     if ext == 'csv':
         for enc in ('utf-8-sig', 'utf-8', 'latin-1', 'cp1252'):
@@ -280,12 +314,7 @@ def _coerce_numeric_series(s: pd.Series) -> pd.Series:
 
 def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
     warnings = base_warnings[:]
-    _cols = list(df.columns)
-    if len(_cols) != len(set(_cols)):
-        warnings.append(
-            'Duplicate column names in the file — all columns are kept; enrichment uses the first column for each name you map. '
-            'Rename columns if you need a different occurrence.'
-        )
+    require_unique_column_names(df.columns)
     inst_scored = _score_instance_columns(df)
     os_scored = _score_os_columns(df)
     (inst_col, inst_amb, inst_ui) = _resolve_best_column(df, inst_scored)
@@ -345,6 +374,7 @@ def load_file(file_obj: BinaryIO, filename: str) -> LoadResult:
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     try:
         raw = file_obj.read() if hasattr(file_obj, 'read') else bytes(file_obj)
+        _reject_oversized(raw, filename)
         df = _parse_dataframe(raw, ext)
     except ValueError:
         raise
@@ -363,6 +393,7 @@ def dataframe_from_bytes(raw_bytes: bytes, filename: str) -> pd.DataFrame:
     """Parse upload bytes to a cleaned DataFrame (no column analysis). For Fix Your Sheet merge."""
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     try:
+        _reject_oversized(raw_bytes, filename)
         df = _parse_dataframe(raw_bytes, ext)
     except ValueError:
         raise
@@ -375,6 +406,7 @@ def dataframe_from_bytes(raw_bytes: bytes, filename: str) -> pd.DataFrame:
     df.reset_index(drop=True, inplace=True)
     if df.empty:
         raise ValueError('All rows are empty after stripping blank lines.')
+    require_unique_column_names(df.columns)
     return df
 
 def finalize_binding(lr: LoadResult, instance_col: str, os_col: str | None, actual_cost_col: str | None) -> LoadResult:

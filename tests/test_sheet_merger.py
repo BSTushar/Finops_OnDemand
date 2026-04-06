@@ -25,6 +25,16 @@ class TestSuggestKeyPairs(unittest.TestCase):
 
 
 class TestMergePrimaryWithSecondary(unittest.TestCase):
+    def test_duplicate_column_names_in_either_sheet_rejected(self):
+        d1 = pd.DataFrame([[1, 1, 2]], columns=['id', 'x', 'x'])
+        d2 = pd.DataFrame({'id': [1]})
+        with self.assertRaises(ValueError):
+            merge_primary_with_secondary(d1, d2, 'id', 'id')
+        d1ok = pd.DataFrame({'id': [1], 'a': [1]})
+        d2bad = pd.DataFrame([[1, 2, 3]], columns=['id', 'y', 'y'])
+        with self.assertRaises(ValueError):
+            merge_primary_with_secondary(d1ok, d2bad, 'id', 'id')
+
     def test_missing_cost_in_d1_filled_from_d2(self):
         d1 = pd.DataFrame({'resource_id': ['a', 'b'], 'Instance': ['m5.large', 'c5.xlarge'], 'OS': ['linux', 'linux'], 'Cost': [pd.NA, pd.NA]})
         d2 = pd.DataFrame({'resource_id': ['a', 'b'], 'Cost': [100.0, 200.0]})

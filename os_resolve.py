@@ -8,8 +8,8 @@ import pandas as pd
 from pricing_normalize import LINUX_FALLBACK_LABEL, normalize_os_engine_key, normalize_pricing_os_label
 
 PRICING_OS_METADATA_NOTE: str = (
-    'Pricing OS is Linux, Windows, or Linux (fallback). '
-    'Missing or unrecognized values use Linux (fallback) and Linux on-demand pricing.'
+    'Pricing OS is exactly Linux or Windows. Missing or unrecognized values are shown as Linux '
+    'and priced with Linux on-demand rates (eu-west-1 SKU table).'
 )
 
 CellOsKind = Literal['linux', 'windows'] | None
@@ -80,7 +80,7 @@ def classify_os_kind(cell: object) -> CellOsKind:
 
 
 def normalize_pricing_os_display(cell: object) -> str:
-    """User-facing bucket: Linux | Windows | Linux (fallback)."""
+    """User-facing bucket: Linux | Windows only (missing → Linux)."""
     return normalize_pricing_os_label(cell)
 
 

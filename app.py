@@ -6,7 +6,7 @@ import re
 import pandas as pd
 import streamlit as st
 from data_loader import OS_COLUMN_NONE_OPTION, LoadResult, analyze_load, dataframe_from_bytes, finalize_binding, load_file
-from excel_export import build_excel, savings_numeric
+from excel_export import build_excel, sanitize_formula_injection_dataframe, savings_numeric
 from processor import apply_na_fill, process
 from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, DEFAULT_REGION, PRICING_SOURCE_LABEL, RDS_PRICING_NOTE, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale, cost_disclaimer_text
 from sheet_merger import merge_primary_with_secondary, suggest_key_pairs
@@ -49,36 +49,22 @@ def _dataframe_for_streamlit_arrow(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _cell_to_display_str(v: object) -> str:
-    """Stable string for st.dataframe — handles NA, bytes, and mixed types."""
-    if v is None:
-        return ''
-    try:
-        if pd.isna(v):
-            return ''
-    except (TypeError, ValueError):
-        pass
-    if isinstance(v, bytes):
-        try:
-            return v.decode('utf-8', errors='replace')
-        except Exception:
-            return str(v)
-    return str(v)
-
-
 def _enriched_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    df_display = df.copy() with every cell as str (spec: astype(str) per column).
-    Implemented by index so duplicate column names don't break pandas `df[col].astype(str)`.
-    """
-    if df.empty:
-        return df.copy()
-    cols: list[pd.Series] = []
-    for i in range(df.shape[1]):
-        name = df.columns[i]
-        vals = [_cell_to_display_str(x) for x in df.iloc[:, i].tolist()]
-        cols.append(pd.Series(vals, name=name, dtype=object))
-    return pd.concat(cols, axis=1)
+    """Display-only string view for Streamlit (never mutates enriched export df). Duplicate-safe by position."""
+    df_display = df.copy()
+    if df_display.empty:
+        return df_display
+    parts: list[pd.Series] = []
+    for j in range(df_display.shape[1]):
+        parts.append(
+            pd.Series(
+                df_display.iloc[:, j].astype(str).values,
+                index=df_display.index,
+                name=df_display.columns[j],
+                dtype=str,
+            )
+        )
+    return pd.concat(parts, axis=1)
 
 
 st.set_page_config(page_title='FinOps Optimizer', page_icon='◆', layout='wide', initial_sidebar_state='collapsed')
@@ -1368,7 +1354,8 @@ if df_out is not None:
         with dx1:
             st.download_button('Download Excel', build_excel(export_df, reg_lbl, reg_id), 'finops_recommendations.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', **_ui_stretch_kwargs(st.download_button))
         with dx2:
-            st.download_button('Download CSV', export_df.to_csv(index=False).encode(), 'finops_recommendations.csv', 'text/csv', **_ui_stretch_kwargs(st.download_button))
+            _csv_df = sanitize_formula_injection_dataframe(export_df.copy())
+            st.download_button('Download CSV', _csv_df.to_csv(index=False).encode(), 'finops_recommendations.csv', 'text/csv', **_ui_stretch_kwargs(st.download_button))
 elif lr is None:
     st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Start at step 1</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Upload a spreadsheet and click <strong>Continue</strong>. Steps 2–4 appear after that.</p></div>', unsafe_allow_html=True)
 elif not binding_ready:

@@ -1,21 +1,29 @@
 """Strict normalization for pricing lookups (instance shape, OS label + engine key)."""
 from __future__ import annotations
 import math
+import pandas as pd
 
-LINUX_FALLBACK_LABEL: str = 'Linux (fallback)'
+LINUX_FALLBACK_LABEL: str = 'Linux'
 
 
 def normalize_instance_string(val: object) -> str:
     """Strip and lowercase raw instance / DB class text before validation (e.g. '   M5.LARGE   ' → 'm5.large')."""
     if val is None:
         return ''
+    try:
+        if pd.isna(val):
+            return ''
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, float) and (not math.isfinite(val)):
+        return ''
     return str(val).strip().lower()
 
 
 def normalize_pricing_os_label(val: object) -> str:
     """
-    Values for **Pricing OS** column: Linux | Windows | Linux (fallback).
-    Missing / unrecognized → Linux (fallback) (still priced with Linux on-demand SKU).
+    Values for **Pricing OS** column: exactly **Linux** or **Windows** only.
+    Missing / unrecognized → **Linux** (priced with Linux on-demand SKUs in eu-west-1).
     """
     if val is None:
         return LINUX_FALLBACK_LABEL

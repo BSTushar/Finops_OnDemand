@@ -6,10 +6,10 @@ import re
 from decimal import Decimal
 from typing import Literal
 import pandas as pd
-from data_loader import ColumnBinding
+from data_loader import ColumnBinding, require_unique_column_names
 from instance_api import canonicalize_instance_api_name
 from os_resolve import cell_matches_valid_os_pattern, classify_os_kind
-from pricing_engine import DEFAULT_REGION, PRICING_LOOKUP_REGION, get_price, get_rds_hourly, normalize_pricing_region
+from pricing_engine import DEFAULT_REGION, PRICING_LOOKUP_REGION, get_price, get_rds_hourly
 from pricing_normalize import LINUX_FALLBACK_LABEL, normalize_instance_string, normalize_os_engine_key, normalize_pricing_os_label
 from recommender import CPUFilterMode, get_recommendations
 from rds_recommender import get_rds_recommendations
@@ -104,17 +104,18 @@ def _hourly_cur(inst: str, os_engine: str, backend: Literal['ec2', 'rds']) -> fl
 def _hourly_alt(alt: str | None, os_engine: str, backend: Literal['ec2', 'rds']) -> float | None:
     if not alt or not isinstance(alt, str):
         return None
-    if str(alt).strip() == ALT2_NO_DISTINCT:
+    a = str(alt).strip()
+    if a in (NA, ALT2_NO_DISTINCT) or not a or a.lower() in ('nan', 'none'):
         return None
     return _hourly_cur(normalize_instance_string(alt), os_engine, backend)
 
 
-def _savings_from_hourly(current_hr: float | None, alt_hr: float | None) -> float | str | None:
-    """Savings % from on-demand hourly list prices only: (current - alt) / current × 100."""
+def _savings_from_hourly(current_hr: float | None, alt_hr: float | None) -> float | str:
+    """Savings % from hourly list prices only; missing price → N/A; no hourly discount → No Savings."""
     if current_hr is None or alt_hr is None:
-        return None
+        return NA
     if not math.isfinite(current_hr) or not math.isfinite(alt_hr) or current_hr <= 0:
-        return None
+        return NA
     if alt_hr >= current_hr:
         return NO_SAVINGS
     pct = round((current_hr - alt_hr) / current_hr * 100, 1)
@@ -162,11 +163,7 @@ def _to_float(v) -> float | None:
 
 def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION, service: ServiceMode='both', cpu_filter: CPUFilterMode='both') -> pd.DataFrame:
     cols = list(df.columns)
-    if len(cols) != len(set(cols)):
-        logger.warning(
-            'Duplicate column names in input — using the first occurrence for each mapped column (%s duplicate label(s)).',
-            len(cols) - len(set(cols)),
-        )
+    require_unique_column_names(cols)
     _reserved = frozenset(INSERT_COLS)
     _bad = [c for c in cols if c in _reserved]
     if _bad:
@@ -180,20 +177,17 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     except ValueError as exc:
         raise ValueError('Instance column not in DataFrame.') from exc
     work = df.copy()
-    pricing_region = normalize_pricing_region(region)
+    _finops_debug = os.environ.get('FINOPS_DEBUG', '').strip().lower() in ('1', 'true', 'yes')
     cc = binding.actual_cost
     cc_idx: int | None = _first_col_index(cols, cc) if (cc and any(c == cc for c in cols)) else None
     os_idx = _first_col_index(cols, binding.os) if binding.os is not None else None
-    logger.info(
-        'FinOps enrichment: rows=%s region=%s service=%s | instance=%r os_binding=%r cost=%r | '
-        'OS cell = bound column if non-empty else first OS-like value in row (any column).',
-        len(work),
-        region,
-        service,
-        binding.instance,
-        binding.os,
-        cc,
-    )
+    if _finops_debug:
+        logger.info(
+            'FinOps enrichment (debug): rows=%s region=%s service=%s',
+            len(work),
+            region,
+            service,
+        )
     if work.empty:
         left = work.iloc[:, : ins_idx + 1].copy()
         right = work.iloc[:, ins_idx + 1 :].copy()
@@ -217,9 +211,9 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     act_out: list = [None] * n
     pricing_os_out: list[str] = [LINUX_FALLBACK_LABEL] * n
     cpu: CPUFilterMode = cpu_filter if cpu_filter in ('default', 'intel', 'graviton', 'both') else 'both'
-    debug_os_sample: list[tuple[str, str]] = []
-    debug_price_sample: list[tuple[str, str, object]] = []
-    _finops_debug = os.environ.get('FINOPS_DEBUG', '').strip().lower() in ('1', 'true', 'yes')
+    row_na_fallback_count = 0
+    _price_region = PRICING_LOOKUP_REGION
+    assert _price_region == 'eu-west-1', 'Hourly pricing must use eu-west-1 bundled SKU table'
     for i in range(n):
         raw_inst = inst_series.iloc[i]
         raw_inst_norm = normalize_instance_string(raw_inst)
@@ -238,10 +232,14 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 disp_inst = normalize_instance_string(canon)
             if canon is None:
                 a1i[i] = a2i[i] = NA
-                cur_p[i] = a1p[i] = a2p[i] = a1s[i] = a2s[i] = None
+                cur_p[i] = a1p[i] = a2p[i] = None
+                a1s[i] = a2s[i] = NA
                 continue
             inst = disp_inst
             if not _row_matches_service(inst, service):
+                cur_p[i] = a1p[i] = a2p[i] = None
+                a1i[i] = a2i[i] = NA
+                a1s[i] = a2s[i] = NA
                 continue
             backend = _row_price_service(inst, service)
             rec = get_rds_recommendations(inst, cpu_filter=cpu) if backend == 'rds' else get_recommendations(inst, cpu_filter=cpu)
@@ -253,20 +251,22 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             p_a1 = _hourly_alt(alt1, os_engine, backend)
             p_a2 = _hourly_alt(alt2, os_engine, backend)
             cur_p[i] = p_cur
-            a1i[i] = alt1
+            a1i[i] = alt1 if alt1 is not None else NA
             if alt2 is not None:
                 a2i[i] = alt2
             elif alt1 is not None:
                 a2i[i] = ALT2_NO_DISTINCT
             else:
-                a2i[i] = None
+                a2i[i] = NA
             a1p[i] = p_a1
             a2p[i] = p_a2
             a1s[i] = _savings_from_hourly(p_cur, p_a1)
             a2s[i] = _savings_from_hourly(p_cur, p_a2)
         except Exception as exc:
-            logger.warning('Row %s: enrichment failed (%s) — filled N/A.', i, type(exc).__name__)
-            logger.debug('Row enrichment detail', exc_info=True)
+            row_na_fallback_count += 1
+            if _finops_debug:
+                logger.warning('Row %s: enrichment failed (%s) — filled N/A.', i, type(exc).__name__)
+                logger.debug('Row enrichment detail', exc_info=True)
             try:
                 pricing_os_out[i] = normalize_pricing_os_label(raw_os_cell)
             except Exception:
@@ -277,23 +277,18 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 os_engine = 'linux'
             cur_p[i] = a1p[i] = a2p[i] = None
             a1i[i] = a2i[i] = NA
-            a1s[i] = a2s[i] = None
-        if len(debug_os_sample) < 5:
-            debug_os_sample.append((pricing_os_out[i], os_engine))
-        if _finops_debug and len(debug_price_sample) < 5:
-            debug_price_sample.append((disp_inst, pricing_os_out[i], cur_p[i]))
-    if debug_os_sample:
-        logger.info('FinOps OS resolution sample (Pricing OS label, engine key): %s', debug_os_sample)
+            a1s[i] = a2s[i] = NA
     if _finops_debug:
         print(
-            f'[FinOps DEBUG] os_binding_column={binding.os!r} rows={n} ui_region={region!r} '
-            f'canonical_region={normalize_pricing_region(region)!r} hourly_lookup_region={PRICING_LOOKUP_REGION!r}',
+            f'[FinOps DEBUG] hourly_lookup_region={PRICING_LOOKUP_REGION} rows={n} ui_region={region!r}',
             flush=True,
         )
-        print(f'[FinOps DEBUG] OS sample (Pricing OS, engine key) first rows: {debug_os_sample}', flush=True)
-        for j, (i_s, o_s, p_v) in enumerate(debug_price_sample):
-            p_show = p_v if p_v is not None else 'N/A'
-            print(f'[FinOps DEBUG] row {j} instance={i_s!r} os={o_s!r} price={p_show!r}', flush=True)
+        for j in range(min(5, n)):
+            inst_j = normalize_instance_string(inst_series.iloc[j])
+            os_j = pricing_os_out[j]
+            pj = cur_p[j]
+            p_txt = f'{pj:.6f}' if isinstance(pj, (int, float)) and math.isfinite(float(pj)) else 'N/A'
+            print(f'[FinOps DEBUG] {inst_j} {os_j} {PRICING_LOOKUP_REGION} {p_txt}', flush=True)
     left = work.iloc[:, :ins_idx + 1].copy()
     right = work.iloc[:, ins_idx + 1:].copy()
     mid = pd.DataFrame(
@@ -313,6 +308,8 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     out = pd.concat([left, mid, right], axis=1)
     assert len(out) == len(work), 'Row count changed'
     assert len(out.columns) == len(work.columns) + len(INSERT_COLS), 'Column count wrong'
+    _expected_cols = list(work.columns[: ins_idx + 1]) + INSERT_COLS + list(work.columns[ins_idx + 1 :])
+    assert list(out.columns) == _expected_cols, 'Original columns must appear in the same order with enrichment inserted after the instance column only'
     assert list(out.columns[: ins_idx + 1]) == list(work.columns[: ins_idx + 1])
     assert list(out.columns[ins_idx + 1 + len(INSERT_COLS) :]) == list(work.columns[ins_idx + 1 :])
     for k in range(ins_idx + 1):
@@ -320,13 +317,10 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     for k in range(ins_idx + 1, len(work.columns)):
         j = k + len(INSERT_COLS)
         assert out.iloc[:, j].tolist() == work.iloc[:, k].tolist(), 'mutated original trailing'
-    logger.info(
-        'Processed %s rows service=%s hourly_prices_region=%s ui_region=%r',
-        len(out),
-        service,
-        PRICING_LOOKUP_REGION,
-        region,
-    )
+    if row_na_fallback_count:
+        logger.info('FinOps enrichment: %s row(s) returned N/A fallback (invalid or unsupported row data).', row_na_fallback_count)
+    if _finops_debug:
+        logger.info('FinOps enrichment finished rows=%s', len(out))
     return out
 
 def _na_like(x: object) -> bool:

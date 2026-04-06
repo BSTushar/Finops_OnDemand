@@ -71,12 +71,12 @@ class TestAdversarialMerge(unittest.TestCase):
         out, w = merge_primary_with_secondary(d1, d2, 'k', 'k')
         self.assertTrue((out['extra'].isna()).all() or out['extra'].tolist() == [pd.NA])
 
-    def test_merge_duplicate_primary_columns_last_wins_documented(self):
-        # pandas allows duplicate headers; merge uses dict — last wins (known limitation)
+    def test_merge_duplicate_primary_columns_rejected(self):
         d1 = pd.DataFrame([[1, 2, 3]], columns=['k', 'a', 'a'])
         d2 = pd.DataFrame({'k': [1], 'b': [9]})
-        out, _ = merge_primary_with_secondary(d1, d2, 'k', 'k')
-        self.assertIn('b', out.columns)
+        with self.assertRaises(ValueError) as ctx:
+            merge_primary_with_secondary(d1, d2, 'k', 'k')
+        self.assertIn('duplicate', str(ctx.exception).lower())
 
 
 if __name__ == '__main__':

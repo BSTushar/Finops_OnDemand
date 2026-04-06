@@ -5,7 +5,47 @@ import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from os_resolve import PRICING_OS_METADATA_NOTE
-from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, PRICING_SOURCE_LABEL, cost_disclaimer_text, format_pricing_snapshot_line
+from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, PRICING_SOURCE_LABEL, _last_updated_utc, cost_disclaimer_text, format_pricing_snapshot_line
+
+_FORMULA_TRIGGER_CHARS = frozenset('=@+-')
+
+
+def sanitize_formula_injection_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Prefix string cells that could be interpreted as Excel formulas when the file is opened (= + - @)."""
+    out = df.copy()
+    for c in out.columns:
+        s = out[c]
+        if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_object_dtype(s):
+            continue
+
+        def _fix(v: object) -> object:
+            if v is None:
+                return v
+            try:
+                if pd.isna(v):
+                    return v
+            except (TypeError, ValueError):
+                pass
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                if isinstance(v, float) and pd.isna(v):
+                    return v
+                return v
+            if isinstance(v, bytes):
+                try:
+                    text = v.decode('utf-8', errors='replace')
+                except Exception:
+                    text = str(v)
+            else:
+                text = str(v)
+            stripped = text.lstrip()
+            if stripped and stripped[0] in _FORMULA_TRIGGER_CHARS:
+                return "'" + text
+            return v
+
+        out[c] = s.map(_fix)
+    return out
 
 
 def savings_numeric(v) -> float | None:
@@ -28,12 +68,13 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
     buf = io.BytesIO()
     preamble_rows = 4
     startrow = preamble_rows + 1
-    ncol = max(len(df.columns), 1)
+    safe_df = sanitize_formula_injection_dataframe(df)
+    ncol = max(len(safe_df.columns), 1)
     end_letter = get_column_letter(ncol)
     snapshot = format_pricing_snapshot_line(pricing_region_id)
     disclaimer = cost_disclaimer_text(pricing_region_id)
     with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Recommendations', startrow=startrow)
+        safe_df.to_excel(writer, index=False, sheet_name='Recommendations', startrow=startrow)
         wb = writer.book
         ws = writer.sheets['Recommendations']
         thin = Side(style='thin', color='888888')
@@ -63,12 +104,12 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
             c.fill = hdr_fill
             c.border = bdr
             c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        sav_cols = [c for c in df.columns if 'Savings %' in c]
-        price_cols = [c for c in df.columns if ('Cost ($)' in c or '$/hr' in c)]
+        sav_cols = [c for c in safe_df.columns if 'Savings %' in c]
+        price_cols = [c for c in safe_df.columns if ('Cost ($)' in c or '$/hr' in c)]
         green_fill = PatternFill('solid', fgColor='D1FAE5')
         amber_fill = PatternFill('solid', fgColor='FEF3C7')
         red_fill = PatternFill('solid', fgColor='FEE2E2')
-        col_list = list(df.columns)
+        col_list = list(safe_df.columns)
         first_data_row = hdr_row + 1
         for ridx in range(first_data_row, ws.max_row + 1):
             for cidx in range(1, ncol + 1):
@@ -111,7 +152,7 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
         ws_m.append(['Pricing region (label)', region_label])
         ws_m.append(['Pricing region (id)', pricing_region_id])
         ws_m.append(['Pricing source', PRICING_SOURCE_LABEL])
-        ws_m.append(['Dataset as-of', CACHE_METADATA['last_updated'].strftime('%Y-%m-%d')])
+        ws_m.append(['Dataset as-of', _last_updated_utc().strftime('%Y-%m-%d')])
         ws_m.append(['Pricing OS handling', PRICING_OS_METADATA_NOTE])
-        ws_m.append(['Rows (data)', len(df)])
+        ws_m.append(['Rows (data)', len(safe_df)])
     return buf.getvalue()
