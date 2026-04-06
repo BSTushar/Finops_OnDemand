@@ -5,12 +5,13 @@ from typing import Literal
 import pandas as pd
 from data_loader import ColumnBinding
 from instance_api import canonicalize_instance_api_name
+from os_resolve import engine_os_for_pricing, normalize_pricing_os_display
 from pricing_engine import DEFAULT_REGION, get_price, get_rds_hourly
 from recommender import CPUFilterMode, get_recommendations
 from rds_recommender import get_rds_recommendations
 logger = logging.getLogger(__name__)
 ServiceMode = Literal['ec2', 'rds', 'both']
-INSERT_COLS: list[str] = ['Actual Cost ($)', 'Alt1 Instance', 'Alt1 Cost ($)', 'Alt1 Savings %', 'Alt2 Instance', 'Alt2 Cost ($)', 'Alt2 Savings %']
+INSERT_COLS: list[str] = ['Pricing OS', 'Actual Cost ($)', 'Alt1 Instance', 'Alt1 Cost ($)', 'Alt1 Savings %', 'Alt2 Instance', 'Alt2 Cost ($)', 'Alt2 Savings %']
 NA = 'N/A'
 NO_SAVINGS = 'No Savings'
 ALT2_NO_DISTINCT = 'N/A (No distinct alternative)'
@@ -77,14 +78,22 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     if df.empty:
         raise ValueError('Cannot process an empty DataFrame.')
     cols = list(df.columns)
-    if binding.instance not in cols or binding.os not in cols:
+    if len(cols) != len(set(cols)):
+        raise ValueError('Duplicate column names in the input are not supported — fix the source file before enrichment.')
+    _reserved = frozenset(INSERT_COLS)
+    _bad = [c for c in cols if c in _reserved]
+    if _bad:
+        raise ValueError(f'Input contains reserved enrichment column name(s): {sorted(set(_bad))!r}. Rename in source and re-upload to preserve data integrity.')
+    if binding.instance not in cols:
         raise ValueError('Binding columns missing from DataFrame.')
+    if binding.os is not None and binding.os not in cols:
+        raise ValueError('Binding OS column missing from DataFrame.')
     try:
         ins_idx = cols.index(binding.instance)
     except ValueError as exc:
         raise ValueError('Instance column not in DataFrame.') from exc
     n = len(df)
-    (ci, co) = (binding.instance, binding.os)
+    ci = binding.instance
     cc = binding.actual_cost
     actual_vals: list[float | None] = []
     if cc and cc in cols:
@@ -93,7 +102,6 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     else:
         actual_vals = [None] * n
     inst_series = df[ci].astype(str).str.strip()
-    os_series = df[co].astype(str).str.strip()
     a1i: list = [None] * n
     a1c: list = [None] * n
     a1s: list = [None] * n
@@ -101,12 +109,15 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     a2c: list = [None] * n
     a2s: list = [None] * n
     act_out: list = [None] * n
+    pricing_os_out: list[str] = ['Linux'] * n
     cpu: CPUFilterMode = cpu_filter if cpu_filter in ('default', 'intel', 'graviton', 'both') else 'both'
     for i in range(n):
         raw_inst = inst_series.iloc[i]
-        os_val = os_series.iloc[i] or 'linux'
+        raw_os_cell = df.iloc[i][binding.os] if binding.os is not None else None
         act = actual_vals[i]
         act_out[i] = act
+        pricing_os_out[i] = normalize_pricing_os_display(raw_os_cell)
+        os_engine = engine_os_for_pricing(raw_os_cell)
         canon = canonicalize_instance_api_name(raw_inst)
         if canon is None:
             continue
@@ -119,9 +130,9 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
         alt2 = rec.get('alt2')
         if alt1 and alt2 and (alt1 == alt2):
             alt2 = None
-        p_cur = _hourly_cur(inst, region, os_val, backend)
-        p_a1 = _hourly_alt(alt1, region, os_val, backend)
-        p_a2 = _hourly_alt(alt2, region, os_val, backend)
+        p_cur = _hourly_cur(inst, region, os_engine, backend)
+        p_a1 = _hourly_alt(alt1, region, os_engine, backend)
+        p_a2 = _hourly_alt(alt2, region, os_engine, backend)
         a1i[i] = alt1
         if alt2 is not None:
             a2i[i] = alt2
@@ -137,7 +148,7 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
         a2s[i] = _savings_display(act, c2)
     left = df.iloc[:, :ins_idx + 1].copy()
     right = df.iloc[:, ins_idx + 1:].copy()
-    mid = pd.DataFrame({INSERT_COLS[0]: act_out, INSERT_COLS[1]: a1i, INSERT_COLS[2]: a1c, INSERT_COLS[3]: a1s, INSERT_COLS[4]: a2i, INSERT_COLS[5]: a2c, INSERT_COLS[6]: a2s}, index=df.index)
+    mid = pd.DataFrame({INSERT_COLS[0]: pricing_os_out, INSERT_COLS[1]: act_out, INSERT_COLS[2]: a1i, INSERT_COLS[3]: a1c, INSERT_COLS[4]: a1s, INSERT_COLS[5]: a2i, INSERT_COLS[6]: a2c, INSERT_COLS[7]: a2s}, index=df.index)
     out = pd.concat([left, mid, right], axis=1)
     assert len(out) == len(df), 'Row count changed'
     assert len(out.columns) == len(df.columns) + len(INSERT_COLS), 'Column count wrong'

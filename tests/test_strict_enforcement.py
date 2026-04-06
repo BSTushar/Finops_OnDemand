@@ -46,6 +46,20 @@ class TestStrictPricing(unittest.TestCase):
 
 class TestProcessorStrict(unittest.TestCase):
 
+    def test_reserved_enrichment_column_name_rejected(self):
+        df = pd.DataFrame({'API Name': ['m5.large'], 'Pricing OS': ['linux'], 'Spend': [10.0]})
+        b = ColumnBinding(instance='API Name', os='Pricing OS', actual_cost='Spend')
+        with self.assertRaises(ValueError) as ctx:
+            process(df, b, region='eu-west-1')
+        self.assertIn('reserved', str(ctx.exception).lower())
+
+    def test_duplicate_input_columns_rejected(self):
+        df = pd.DataFrame([[1, 2, 3]], columns=['Instance', 'Instance', 'OS'])
+        b = ColumnBinding(instance='Instance', os='OS', actual_cost=None)
+        with self.assertRaises(ValueError) as ctx:
+            process(df, b, region='eu-west-1')
+        self.assertIn('duplicate', str(ctx.exception).lower())
+
     def test_missing_rds_price_recommendations_without_cost(self):
         df = pd.DataFrame({'API Name': ['db.c5.2xlarge'], 'OS': ['linux'], 'Spend': [100.0]})
         b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')

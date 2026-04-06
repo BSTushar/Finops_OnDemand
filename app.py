@@ -4,7 +4,7 @@ import logging
 import re
 import pandas as pd
 import streamlit as st
-from data_loader import LoadResult, analyze_load, dataframe_from_bytes, finalize_binding, load_file
+from data_loader import OS_COLUMN_NONE_OPTION, LoadResult, analyze_load, dataframe_from_bytes, finalize_binding, load_file
 from excel_export import build_excel, savings_numeric
 from processor import apply_na_fill, process
 from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, DEFAULT_REGION, PRICING_SOURCE_LABEL, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale, cost_disclaimer_text
@@ -1163,10 +1163,16 @@ if lr is not None and (not binding_ready):
                     di = cols_all.index(lr.instance_candidates[0]) if lr.instance_candidates[0] in cols_all else 0
                 inst_sel = st.selectbox('Instance / DB class (AWS API Name)', cols_all, index=min(di, len(cols_all) - 1))
             with mc2:
-                do = 0
-                if lr.os_candidates:
-                    do = cols_all.index(lr.os_candidates[0]) if lr.os_candidates[0] in cols_all else 0
-                os_sel = st.selectbox('OS / engine column', cols_all, index=min(do, len(cols_all) - 1))
+                if lr.needs_os_pick:
+                    os_opts = list(lr.os_candidates)
+                    os_sel = st.selectbox('OS / engine column (multiple matches — pick one)', os_opts, index=0)
+                else:
+                    os_opts = [OS_COLUMN_NONE_OPTION] + cols_all
+                    default_os = OS_COLUMN_NONE_OPTION
+                    if lr.os_candidates and lr.os_candidates[0] in cols_all:
+                        default_os = lr.os_candidates[0]
+                    oi = os_opts.index(default_os) if default_os in os_opts else 0
+                    os_sel = st.selectbox('OS / engine column (optional — detected from cell values)', os_opts, index=min(oi, len(os_opts) - 1))
             cost_sel = None
             if len(lr.cost_candidates) > 1:
                 cost_sel = st.selectbox('Actual cost column (required for savings)', lr.cost_candidates, key='cost_ambiguous')
@@ -1178,7 +1184,8 @@ if lr is not None and (not binding_ready):
                     cost_sel = None
             if st.button('Save mapping', type='primary'):
                 try:
-                    b = finalize_binding(lr, inst_sel, os_sel, cost_sel).binding
+                    os_final = None if os_sel == OS_COLUMN_NONE_OPTION else os_sel
+                    b = finalize_binding(lr, inst_sel, os_final, cost_sel).binding
                     st.session_state['binding'] = b
                     st.session_state['cost_pick'] = cost_sel
                     st.rerun()
@@ -1196,6 +1203,12 @@ if lr is not None and (not binding_ready):
 if lr is not None and st.session_state.get('binding') is not None:
     chosen_binding = st.session_state['binding']
     binding_ready = True
+    st.markdown(
+        '<p class="finops-pipeline-note" style="text-align:center;margin:0.35rem 0 0.75rem;font-weight:600;">'
+        'Pricing baseline: <strong>Linux</strong> (fallback applied where OS column is absent, blank, or not recognized).'
+        '</p>',
+        unsafe_allow_html=True,
+    )
     if st.session_state.get('result') is None:
         with st.container(border=True):
             _flow_step(3, 'Run enrichment', 'Applies list prices for your region and fills Alt instances, indicative costs, and savings.')

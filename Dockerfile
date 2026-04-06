@@ -17,6 +17,7 @@ COPY app.py                  .
 COPY excel_export.py         .
 COPY instance_api.py         .
 COPY data_loader.py          .
+COPY os_resolve.py           .
 COPY sheet_merger.py         .
 COPY processor.py            .
 COPY recommender.py          .

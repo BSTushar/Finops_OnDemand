@@ -185,7 +185,7 @@ class TestExcelExportShape(unittest.TestCase):
         snap = ws['A2'].value
         self.assertIn('Pricing Snapshot:', str(snap))
         self.assertIn('eu-west-1', str(snap))
-        hdr_row = 5
+        hdr_row = 6
         headers = [ws.cell(row=hdr_row, column=j).value for j in range(1, len(proc.columns) + 1)]
         self.assertEqual(headers, list(proc.columns))
 
@@ -205,7 +205,7 @@ class TestPreshipServiceSmoke(unittest.TestCase):
 
     def test_ec2_mode(self):
         out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='ec2', cpu_filter='both'))
-        self.assertEqual(list(out.columns[:5]), ['Instance', 'Actual Cost ($)', 'Alt1 Instance', 'Alt1 Cost ($)', 'Alt1 Savings %'])
+        self.assertEqual(list(out.columns[:6]), ['Instance', 'Pricing OS', 'Actual Cost ($)', 'Alt1 Instance', 'Alt1 Cost ($)', 'Alt1 Savings %'])
         self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
         self.assertEqual(out['Alt1 Instance'].iloc[1], 'N/A')
 
@@ -227,7 +227,7 @@ class TestPreshipServiceSmoke(unittest.TestCase):
         bio.seek(0)
         wb = load_workbook(bio, read_only=True)
         ws = wb.active
-        hdr = [ws.cell(row=5, column=j).value for j in range(1, len(out.columns) + 1)]
+        hdr = [ws.cell(row=6, column=j).value for j in range(1, len(out.columns) + 1)]
         self.assertEqual(hdr, list(out.columns))
 
 
