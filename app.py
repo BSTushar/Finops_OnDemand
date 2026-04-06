@@ -1,5 +1,6 @@
 from __future__ import annotations
 import html
+import inspect
 import logging
 import re
 import pandas as pd
@@ -11,6 +12,43 @@ from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, DEFAULT_REGION
 from sheet_merger import merge_primary_with_secondary, suggest_key_pairs
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger(__name__)
+
+
+def _ui_stretch_kwargs(widget=st.dataframe) -> dict:
+    """Streamlit ≥1.46 prefers width='stretch'; older versions use use_container_width."""
+    if 'width' in inspect.signature(widget).parameters:
+        return {'width': 'stretch'}
+    return {'use_container_width': True}
+
+
+def _dataframe_for_streamlit_arrow(df: pd.DataFrame) -> pd.DataFrame:
+    """PyArrow rejects object columns that mix bytes, int, str, etc. Coerce object cols to pandas string dtype."""
+    if df.empty:
+        return df
+    out = df.copy()
+    for c in out.columns:
+        if out[c].dtype != object:
+            continue
+
+        def _scalar(v: object):
+            if v is None:
+                return pd.NA
+            try:
+                if pd.isna(v):
+                    return pd.NA
+            except (TypeError, ValueError):
+                pass
+            if isinstance(v, bytes):
+                try:
+                    return v.decode('utf-8', errors='replace')
+                except Exception:
+                    return str(v)
+            return str(v)
+
+        out[c] = out[c].map(_scalar).astype('string')
+    return out
+
+
 st.set_page_config(page_title='FinOps Optimizer', page_icon='◆', layout='wide', initial_sidebar_state='collapsed')
 FINOPS_UI_CSS = """
 <style>
@@ -1018,7 +1056,7 @@ if _fix_mdf is not None:
     st.markdown(f'<div class="finops-alert finops-alert--ok">✅ Merged preview: **{len(_fix_mdf):,}** rows × **{len(_fix_mdf.columns)}** columns</div>', unsafe_allow_html=True)
     for _fw in st.session_state.get('fix_merge_warnings', []):
         st.markdown(f'<div class="finops-alert finops-alert--warn">⚠️ {_fw}</div>', unsafe_allow_html=True)
-    st.dataframe(_fix_mdf.head(40), use_container_width=True, hide_index=True, height=360)
+    st.dataframe(_dataframe_for_streamlit_arrow(_fix_mdf.head(40)), **_ui_stretch_kwargs(), hide_index=True, height=360)
     if st.button('Use merged data', type='primary', key='fix_sheet_apply'):
         _mw = st.session_state.get('fix_merge_warnings', [])
         _bw = ['Dataset prepared with Fix Your Sheet (two files merged on key).'] + list(_mw)
@@ -1054,7 +1092,7 @@ with st.container(border=True):
         st.session_state['cpu_filter'] = st.selectbox('cpu', ['both', 'default', 'intel', 'graviton'], format_func=lambda x: {'both': 'Both', 'default': 'Default', 'intel': 'Intel', 'graviton': 'Graviton'}[x], label_visibility='collapsed')
     with go_col:
         st.markdown('<div class="finops-sec">Next</div>', unsafe_allow_html=True)
-        run = st.button('Continue', type='primary', disabled=uploaded is None, use_container_width=True)
+        run = st.button('Continue', type='primary', disabled=uploaded is None, **_ui_stretch_kwargs(st.button))
 _reg = st.session_state.get('region_id', DEFAULT_REGION)
 _rid_s = html.escape(_reg.strip().lower())
 _rlabel_s = html.escape(REGION_LABELS.get(_reg.strip().lower(), _reg))
@@ -1289,24 +1327,25 @@ if df_out is not None:
             return _f
         fmt_map = {c: _fmt_cell(c) for c in view.columns if 'Savings %' in c or 'Cost ($)' in c}
         style_cols = {c: _style_sav for c in view.columns if 'Savings %' in c}
+        view_ui = _dataframe_for_streamlit_arrow(view)
         try:
-            sty = view.style.format(fmt_map, na_rep='N/A')
+            sty = view_ui.style.format(fmt_map, na_rep='N/A')
             for (col_name, fn) in style_cols.items():
                 sty = sty.map(fn, subset=[col_name])
             sty = sty.set_properties(**{'font-size': '0.8rem'})
         except Exception as ex:
             log.debug('dataframe style skipped: %s', type(ex).__name__)
-            sty = view
+            sty = view_ui
         st.markdown('<div id="finops-enriched-df-anchor"></div>', unsafe_allow_html=True)
-        st.dataframe(sty, use_container_width=True, hide_index=True, height=500)
+        st.dataframe(sty, **_ui_stretch_kwargs(), hide_index=True, height=500)
         export_df = apply_na_fill(df_out)
         reg_id = st.session_state.get('region_id', DEFAULT_REGION)
         reg_lbl = REGION_LABELS.get(reg_id, '')
         (dx1, dx2) = st.columns(2)
         with dx1:
-            st.download_button('Download Excel', build_excel(export_df, reg_lbl, reg_id), 'finops_recommendations.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
+            st.download_button('Download Excel', build_excel(export_df, reg_lbl, reg_id), 'finops_recommendations.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', **_ui_stretch_kwargs(st.download_button))
         with dx2:
-            st.download_button('Download CSV', export_df.to_csv(index=False).encode(), 'finops_recommendations.csv', 'text/csv', use_container_width=True)
+            st.download_button('Download CSV', export_df.to_csv(index=False).encode(), 'finops_recommendations.csv', 'text/csv', **_ui_stretch_kwargs(st.download_button))
 elif lr is None:
     st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Start at step 1</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Upload a spreadsheet and click <strong>Continue</strong>. Steps 2–4 appear after that.</p></div>', unsafe_allow_html=True)
 elif not binding_ready:

@@ -183,6 +183,28 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
         binding = ColumnBinding(instance=inst_col, os=os_col, actual_cost=cost_c[0] if len(cost_c) == 1 else None)
     return LoadResult(df=df, warnings=warnings, instance_candidates=inst_c_list, os_candidates=os_c_list, cost_candidates=cost_c, binding=binding, needs_instance_pick=needs_i, needs_os_pick=needs_o, needs_cost_pick=needs_cost_pick and len(cost_c) > 1)
 
+def _normalize_loaded_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Blank strings → NA without deprecated replace downcasting; keeps non-object dtypes."""
+    df = df.copy()
+
+    def _is_blank(x: object) -> bool:
+        if x is None:
+            return True
+        try:
+            if pd.isna(x):
+                return True
+        except (TypeError, ValueError):
+            pass
+        return isinstance(x, str) and x.strip() == ''
+
+    for col in df.columns:
+        s = df[col]
+        if not (pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)):
+            continue
+        df[col] = s.mask(s.map(_is_blank), pd.NA)
+    return df
+
+
 def load_file(file_obj: BinaryIO, filename: str) -> LoadResult:
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     try:
@@ -194,8 +216,7 @@ def load_file(file_obj: BinaryIO, filename: str) -> LoadResult:
         raise ValueError(f"Failed to read file '{filename}': {exc}") from exc
     if df.empty:
         raise ValueError('The uploaded file contains no data rows.')
-    df = df.copy()
-    df.replace('', pd.NA, inplace=True)
+    df = _normalize_loaded_dataframe(df)
     df.dropna(how='all', inplace=True)
     df.dropna(axis=1, how='all', inplace=True)
     df.reset_index(drop=True, inplace=True)
@@ -214,8 +235,7 @@ def dataframe_from_bytes(raw_bytes: bytes, filename: str) -> pd.DataFrame:
         raise ValueError(f"Failed to read file '{filename}': {exc}") from exc
     if df.empty:
         raise ValueError('The uploaded file contains no data rows.')
-    df = df.copy()
-    df.replace('', pd.NA, inplace=True)
+    df = _normalize_loaded_dataframe(df)
     df.dropna(how='all', inplace=True)
     df.dropna(axis=1, how='all', inplace=True)
     df.reset_index(drop=True, inplace=True)
