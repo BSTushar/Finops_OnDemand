@@ -1072,14 +1072,42 @@ def _savings_for_kpi(v) -> float | None:
         return None
     return savings_numeric(v)
 
+
+def _series_savings_pct(col_name: str, df: pd.DataFrame) -> pd.Series:
+    col = df.get(col_name)
+    if col is None or len(col) == 0:
+        return pd.Series(dtype=float)
+    raw = [_savings_for_kpi(x) for x in col]
+    return pd.to_numeric(pd.Series(raw), errors='coerce').dropna()
+
+
+def _old_generation_detail_table(df: pd.DataFrame, inst_col: str | None) -> pd.DataFrame:
+    """Rows in the current view whose instance cell matches the older-gen family heuristic (same as red KPI)."""
+    if not inst_col or inst_col not in df.columns or df.empty:
+        return pd.DataFrame()
+    extra = [c for c in ('Pricing OS', 'Current Price ($/hr)', 'Alt1 Instance', 'Alt1 Savings %', 'Alt2 Instance', 'Alt2 Savings %') if c in df.columns]
+    cols = [inst_col] + [c for c in extra if c != inst_col]
+    sub = df.loc[:, cols].copy()
+    mask = sub[inst_col].map(_is_old_gen_instance_cell)
+    out = sub.loc[mask].copy()
+    out.reset_index(drop=True, inplace=True)
+    return out
+
+
 def kpis(df: pd.DataFrame) -> dict:
-    col = df.get('Alt1 Savings %')
-    raw = [_savings_for_kpi(x) for x in col] if col is not None and len(col) else []
-    s1 = pd.to_numeric(pd.Series(raw), errors='coerce').dropna()
-    return {'total': len(df), 'avg1': float(s1.mean()) if len(s1) else None, 'max1': float(s1.max()) if len(s1) else None, 'act_col': 'Actual Cost ($)' in df.columns}
+    s1 = _series_savings_pct('Alt1 Savings %', df)
+    s2 = _series_savings_pct('Alt2 Savings %', df)
+    return {
+        'total': len(df),
+        'avg1': float(s1.mean()) if len(s1) else None,
+        'max1': float(s1.max()) if len(s1) else None,
+        'max2': float(s2.max()) if len(s2) else None,
+        'act_col': 'Actual Cost ($)' in df.columns,
+    }
+
 
 def render_kpis(k: dict):
-    (c1, c2, c3, c4) = st.columns(4)
+    (c1, c2, c3, c4, c5) = st.columns(5)
     with c1:
         st.markdown(f"""<div class="finops-metric finops-metric--neutral"><div class="finops-metric-label">Rows in view</div><div class="finops-metric-value">{k['total']:,}</div></div>""", unsafe_allow_html=True)
     with c2:
@@ -1089,6 +1117,9 @@ def render_kpis(k: dict):
         v = f"{k['max1']:.1f}%" if k['max1'] is not None else '—'
         st.markdown(f'<div class="finops-metric finops-metric--savings"><div class="finops-metric-label">Max Alt1 savings</div><div class="finops-metric-value">{v}</div></div>', unsafe_allow_html=True)
     with c4:
+        v = f"{k['max2']:.1f}%" if k['max2'] is not None else '—'
+        st.markdown(f'<div class="finops-metric finops-metric--savings"><div class="finops-metric-label">Max Alt2 savings</div><div class="finops-metric-value">{v}</div></div>', unsafe_allow_html=True)
+    with c5:
         st.markdown(f"""<div class="finops-metric finops-metric--neutral"><div class="finops-metric-label">Actual cost column</div><div class="finops-metric-value">{('Yes' if k['act_col'] else 'No')}</div></div>""", unsafe_allow_html=True)
 for (key, default) in (('load_result', None), ('result', None), ('region_id', DEFAULT_REGION), ('service', 'both'), ('cpu_filter', 'both'), ('cost_pick', None)):
     if key not in st.session_state:
@@ -1186,7 +1217,13 @@ with st.container(border=True):
         st.session_state['region_id'] = sel_region
     with svc_col:
         st.markdown('<div class="finops-sec">Service</div>', unsafe_allow_html=True)
-        st.session_state['service'] = st.radio('svc', ['ec2', 'rds', 'both'], format_func=lambda x: {'ec2': 'EC2', 'rds': 'RDS', 'both': 'Both'}[x], label_visibility='collapsed', horizontal=True)
+        st.session_state['service'] = st.radio(
+            'svc',
+            ['both', 'ec2', 'rds'],
+            format_func=lambda x: {'ec2': 'EC2', 'rds': 'RDS', 'both': 'Both'}[x],
+            label_visibility='collapsed',
+            horizontal=True,
+        )
     with cpu_col:
         st.markdown('<div class="finops-sec">CPU</div>', unsafe_allow_html=True)
         st.session_state['cpu_filter'] = st.selectbox('cpu', ['both', 'default', 'intel', 'graviton'], format_func=lambda x: {'both': 'Both', 'default': 'Default', 'intel': 'Intel', 'graviton': 'Graviton'}[x], label_visibility='collapsed')
@@ -1225,7 +1262,7 @@ with st.container(border=True):
         st.markdown(
             """
 **Step 1 — Upload and set pricing**  
-Pick **Pricing region** (list prices for that region), **Service** (EC2 / RDS / Both), and **CPU** (usually Both). Upload CSV or Excel, then **Continue**.
+Pick **Pricing region** (list prices for that region), **Service** (**Both** is the default for mixed CURs — `db.*` rows always use RDS list SKUs), **CPU** (usually Both). Upload CSV or Excel, then **Continue**.
 
 **Optional — Merge two files first** (at the top of the page, before step 1)  
 Skip if you already have one table. Merge on a shared ID, then **Use merged data** or upload the merged file in step 1.
@@ -1418,7 +1455,26 @@ if df_out is not None:
                 'No rows match your current filters. Clear **Search** and **OS contains**, or set **View service** to **Both (show all)**.'
             )
         try:
-            _render_dashboard_kpi_strip(_dashboard_strip_metrics(view, inst_col))
+            _strip_m = _dashboard_strip_metrics(view, inst_col)
+            _render_dashboard_kpi_strip(_strip_m)
+            _og_n = int(_strip_m.get('old_gen') or 0)
+            if _og_n > 0 and inst_col:
+                _og_detail = _old_generation_detail_table(view, inst_col)
+                with st.expander(f'Which resources count as older-gen? ({_og_n} in current view)', expanded=False):
+                    st.caption(
+                        'Same heuristic as the red KPI: instance **family** matches older patterns '
+                        '(**m3–m5**, **c3–c5**, **r3–r5**, **t1–t3** variants), excluding Graviton (**…g**). '
+                        'RDS **`db.`** classes use the segment after **`db.`** as the family.'
+                    )
+                    if _og_detail.empty:
+                        st.warning('Could not list rows — check that the instance column is mapped.')
+                    else:
+                        st.dataframe(
+                            _dataframe_for_streamlit_arrow(_og_detail),
+                            **_ui_stretch_kwargs(),
+                            hide_index=True,
+                            height=min(420, 36 + 28 * len(_og_detail)),
+                        )
             st.markdown('<p class="finops-kpi-strip-title">Row statistics</p>', unsafe_allow_html=True)
             render_kpis(kpis(view))
         except Exception as ex:

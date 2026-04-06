@@ -21,6 +21,17 @@ class TestRdsWindowsGetsClassPrice(unittest.TestCase):
         self.assertEqual(out['Pricing OS'].iloc[0], 'Windows')
         self.assertIn('db.m6i', str(out['Alt1 Instance'].iloc[0]))
 
+    def test_db_row_enriched_when_service_is_ec2(self) -> None:
+        """db.* must use RDS pipeline even if UI service is EC2 (mixed CUR default confusion)."""
+        df = pd.DataFrame({'i': ['  DB.M5.LARGE '], 'p': ['amazon linux'], 'c': [1.0]})
+        b = ColumnBinding(instance='i', os='p', actual_cost='c')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='ec2'))
+        want = get_rds_hourly('db.m5.large', region=PRICING_LOOKUP_REGION, os='linux')
+        self.assertIsNotNone(want)
+        cp = float(out['Current Price ($/hr)'].iloc[0])
+        self.assertAlmostEqual(cp, want, places=4)
+        self.assertIn('db.m6i', str(out['Alt1 Instance'].iloc[0]))
+
 
 class TestWindowsNoGravitonAlts(unittest.TestCase):
     def test_ec2_windows_blocks_graviton_alt2(self) -> None:

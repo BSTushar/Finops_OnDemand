@@ -1,16 +1,15 @@
 from __future__ import annotations
 import re
+from pricing_normalize import normalize_instance_string
+
 VALID_SIZES: frozenset[str] = frozenset({'nano', 'micro', 'small', 'medium', 'large', 'xlarge', '2xlarge', '3xlarge', '4xlarge', '6xlarge', '8xlarge', '9xlarge', '10xlarge', '12xlarge', '16xlarge', '18xlarge', '24xlarge', '32xlarge', '48xlarge', 'metal'})
 _FAMILY_RE = re.compile('^[a-z][a-z0-9]*$')
 
 
 def canonicalize_instance_api_name(value: object) -> str | None:
-    if value is None:
+    s = normalize_instance_string(value)
+    if not s or s in ('nan', 'none', 'n/a'):
         return None
-    s = str(value).strip()
-    if not s or s.lower() in ('nan', 'none', 'n/a', ''):
-        return None
-    s = s.lower()
     if ' ' in s or '\t' in s or '\n' in s:
         return None
     if s.startswith('db.'):

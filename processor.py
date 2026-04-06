@@ -79,20 +79,21 @@ def _raw_os_cell_for_row(
 
 
 def _row_matches_service(inst: str, service: ServiceMode) -> bool:
-    s = str(inst).strip().lower()
+    s = normalize_instance_string(inst)
     if not s or s in ('nan', 'none'):
         return False
     is_rds = s.startswith('db.')
     if service == 'both':
         return True
-    return is_rds if service == 'rds' else not is_rds
+    if service == 'rds':
+        return is_rds
+    # ec2: enrich every valid row; db.* still uses RDS hourly + rds_recommender via _pricing_backend.
+    return True
 
-def _row_price_service(inst: str, mode: ServiceMode) -> Literal['ec2', 'rds']:
-    if mode == 'rds':
-        return 'rds'
-    if mode == 'ec2':
-        return 'ec2'
-    return 'rds' if str(inst).strip().lower().startswith('db.') else 'ec2'
+
+def _pricing_backend(inst: str) -> Literal['ec2', 'rds']:
+    """Hourly + alt SKUs: db.* → RDS tables + rds_recommender; everything else → EC2."""
+    return 'rds' if normalize_instance_string(inst).startswith('db.') else 'ec2'
 
 def _hourly_cur(inst: str, os_engine: str, backend: Literal['ec2', 'rds']) -> float | None:
     """Always use PRICING_LOOKUP_REGION (eu-west-1) for on-demand hourly SKUs."""
@@ -260,7 +261,7 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 a1i[i] = a2i[i] = NA
                 a1s[i] = a2s[i] = NA
                 continue
-            backend = _row_price_service(inst, service)
+            backend = _pricing_backend(inst)
             rec = get_rds_recommendations(inst, cpu_filter=cpu) if backend == 'rds' else get_recommendations(inst, cpu_filter=cpu)
             alt1 = rec.get('alt1')
             alt2 = rec.get('alt2')

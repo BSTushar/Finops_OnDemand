@@ -138,6 +138,9 @@ def get_price(instance_type: str, region: str=DEFAULT_REGION, os: str='linux') -
     if not instance_type or not isinstance(instance_type, str):
         return None
     inst_key = instance_type.lower().strip()
+    # RDS DB instance classes must use get_rds_hourly — never EC2 SKU tables (avoids silent N/A / wrong routing).
+    if inst_key.startswith('db.'):
+        return None
     rgn_key = (region or DEFAULT_REGION).lower().strip()
     os_key = _normalize_os_key(os)
     if os_key is None:

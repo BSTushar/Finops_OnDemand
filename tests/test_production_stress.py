@@ -91,10 +91,12 @@ class TestServiceModeIsolation(unittest.TestCase):
         )
         self.b = ColumnBinding(instance='Instance', os='OS', actual_cost='Cost')
 
-    def test_ec2_only_skips_rds_rows(self):
+    def test_ec2_mode_routes_db_rows_to_rds_pipeline(self):
+        """EC2 service still enriches db.* rows using RDS hourly + rds_recommender (per-row routing)."""
         out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='ec2', cpu_filter='both'))
         self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
-        self.assertEqual(out['Alt1 Instance'].iloc[1], 'N/A')
+        self.assertNotEqual(out['Alt1 Instance'].iloc[1], 'N/A')
+        self.assertTrue(str(out['Alt1 Instance'].iloc[1]).startswith('db.'))
 
     def test_rds_only_skips_ec2_rows(self):
         out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='rds', cpu_filter='both'))
@@ -220,7 +222,7 @@ class TestPreshipServiceSmoke(unittest.TestCase):
             ],
         )
         self.assertNotEqual(out['Alt1 Instance'].iloc[0], 'N/A')
-        self.assertEqual(out['Alt1 Instance'].iloc[1], 'N/A')
+        self.assertNotEqual(out['Alt1 Instance'].iloc[1], 'N/A')
 
     def test_rds_mode(self):
         out = apply_na_fill(process(self.df, self.b, region='eu-west-1', service='rds', cpu_filter='both'))
