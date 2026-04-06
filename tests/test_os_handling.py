@@ -101,6 +101,35 @@ class TestPricingOsInsertionOrder(unittest.TestCase):
         self.assertEqual(list(out.columns[idx + 1 : idx + 1 + len(INSERT_COLS)]), INSERT_COLS)
 
 
+class TestProductColumnUnixAndCostInference(unittest.TestCase):
+
+    def test_product_column_linux_unix_detected_as_os(self):
+        df = pd.DataFrame(
+            {
+                'RecordID': [1, 2, 3],
+                'Product': ['linux', 'unix', 'WIN2019'],
+                'Compute_Class': ['m5.large', 'm5.large', 'm5.large'],
+                'SpendUSD': [10.0, 20.0, 30.0],
+            }
+        )
+        lr = analyze_load(df, [])
+        self.assertEqual(lr.binding.instance, 'Compute_Class')
+        self.assertEqual(lr.binding.os, 'Product')
+        self.assertEqual(lr.binding.actual_cost, 'SpendUSD')
+        out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1'))
+        self.assertEqual(out['Pricing OS'].iloc[0], 'Linux')
+        self.assertEqual(out['Pricing OS'].iloc[1], 'Linux')
+        self.assertEqual(out['Pricing OS'].iloc[2], 'Windows')
+
+    def test_cost_inferred_when_header_not_standard(self):
+        df = pd.DataFrame({'vm': ['m5.large', 'm5.large'], 'Product': ['linux', 'linux'], 'MyMoneyCol': [100.0, 200.0]})
+        lr = analyze_load(df, [])
+        self.assertIsNotNone(lr.binding)
+        self.assertEqual(lr.binding.actual_cost, 'MyMoneyCol')
+        out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1'))
+        self.assertNotEqual(out['Actual Cost ($)'].iloc[0], 'N/A')
+
+
 class TestFinalizeBindingOptionalOs(unittest.TestCase):
 
     def test_finalize_none_os(self):

@@ -14,8 +14,8 @@ PRICING_OS_METADATA_NOTE: str = (
 
 CellOsKind = Literal['linux', 'windows'] | None
 
-# Linux-type tokens (substring / phrase); order: longer phrases first where needed
-_LINUX_PHRASES: tuple[str, ...] = ('amazon linux', 'rhel', 'ubuntu', 'debian', 'linux')
+# Linux-type tokens (substring / phrase); longer phrases first; include unix for Product/SKU-style cols
+_LINUX_PHRASES: tuple[str, ...] = ('amazon linux', 'rhel', 'ubuntu', 'debian', 'unix', 'linux')
 # Windows: avoid matching unrelated words containing "win"
 _WIN_RE = re.compile('\\b(?:windows|win)\\b', re.I)
 _WIN_PREFIX_RE = re.compile('^win\\d{2,4}', re.I)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 import io
+import math
 import re
+import statistics
 from dataclasses import dataclass, field
 from typing import BinaryIO
 import pandas as pd
@@ -16,7 +18,13 @@ def _norm_header(name: str) -> str:
     s = re.sub('\\s+', ' ', s)
     return s
 INSTANCE_HINTS: frozenset[str] = frozenset({'instance type', 'instancetype', 'instance', 'instance type id', 'ec2 type', 'ec2type', 'ec2 type id', 'instance size', 'resource type', 'vm type', 'vm size', 'vmsize', 'ec2 instance type', 'instance class', 'db instance class', 'database class', 'compute class', 'computeclass', 'instance type name', 'api name', 'ec2 api name', 'instance api name'})
-COST_HINTS: frozenset[str] = frozenset({'cost', 'monthly cost', 'total cost', 'charge', 'charges', 'cost ($)', 'cost(usd)', 'cost (usd)', 'cost_usd', 'billed cost', 'blended cost', 'unblended cost', 'amortized cost', 'spend', 'amount', 'total amount', 'billed amount', 'usage cost', 'line item cost', 'cost usd', 'usd cost', 'monthly spend'})
+COST_HINTS: frozenset[str] = frozenset({
+    'cost', 'monthly cost', 'total cost', 'charge', 'charges', 'cost ($)', 'cost(usd)', 'cost (usd)', 'cost_usd',
+    'billed cost', 'blended cost', 'unblended cost', 'amortized cost', 'spend', 'amount', 'total amount',
+    'billed amount', 'usage cost', 'line item cost', 'cost usd', 'usd cost', 'monthly spend',
+    'price', 'pricing', 'fee', 'fees', 'usd', 'payment', 'net amount', 'gross', 'pre tax', 'pretax',
+    'cur', 'currency', 'total usd', 'amount usd', 'usage amount', 'resource cost',
+})
 
 def _header_matches(h: str, hints: frozenset[str]) -> bool:
     n = _norm_header(h)
@@ -75,7 +83,7 @@ def _score_os_columns(df: pd.DataFrame) -> list[tuple[str, float]]:
     return scored
 
 
-_MIN_OS_AUTO_CONF = 0.36
+_MIN_OS_AUTO_CONF = 0.30
 _OS_TIE_BAND = 0.09
 
 def _resolve_os_column(df: pd.DataFrame, scored: list[tuple[str, float]]) -> tuple[str | None, bool, list[str]]:
@@ -111,6 +119,96 @@ def _resolve_best_column(df: pd.DataFrame, scored: list[tuple[str, float]]) -> t
 
 def find_cost_columns(df: pd.DataFrame) -> list[str]:
     return [c for c in df.columns if _header_matches(str(c), COST_HINTS)]
+
+
+def _header_looks_like_identifier_only(h: str) -> bool:
+    """Skip ID/line columns when inferring cost from numeric values (avoids RecordID-style cols)."""
+    n = _norm_header(h)
+    n_compact = n.replace(' ', '')
+    lone = {'id', 'uuid', 'guid', 'index', 'seq', 'sequence', 'recordid', 'rowid', 'lineid'}
+    if n in lone or n_compact in lone:
+        return True
+    for frag in ('lineitemid', 'line item id', 'resource id', 'subscription id', 'transaction id'):
+        if frag.replace(' ', '') in n_compact or frag in n:
+            return True
+    if re.fullmatch(r'[a-z]{2,18}id', n_compact) and not n_compact.endswith('guid'):
+        return True
+    return False
+
+
+def _parse_monetary_cell(cell: object) -> float | None:
+    if cell is None:
+        return None
+    try:
+        if pd.isna(cell):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(cell, bool):
+        return None
+    if _cell_looks_like_instance_type(cell):
+        return None
+    if isinstance(cell, (int, float)):
+        x = float(cell)
+        if not math.isfinite(x):
+            return None
+        return x if x >= 0 else None
+    s = str(cell).strip()
+    if not s or s.lower() in ('nan', 'n/a', 'none', ''):
+        return None
+    s = re.sub(r'^[\$€£]\s*', '', s)
+    s = s.replace(',', '').strip()
+    if not s:
+        return None
+    try:
+        x = float(s)
+    except ValueError:
+        return None
+    if not math.isfinite(x):
+        return None
+    return x if x >= 0 else None
+
+
+def _cell_looks_like_monetary_value(cell: object) -> bool:
+    return _parse_monetary_cell(cell) is not None
+
+
+def _median_monetary_sample(df: pd.DataFrame, col: str) -> float | None:
+    n = min(len(df), _VALUE_SAMPLE_CAP)
+    vals: list[float] = []
+    for v in df[col].iloc[:n]:
+        x = _parse_monetary_cell(v)
+        if x is not None:
+            vals.append(x)
+    if len(vals) < 2:
+        return None
+    return float(statistics.median(vals))
+
+
+def find_cost_columns_combined(df: pd.DataFrame, skip_cols: set[str] | None=None) -> tuple[list[str], bool]:
+    """Header hints plus value-based money detection. Returns (columns, value_only_flag)."""
+    skip = skip_cols or set()
+    by_header = [c for c in find_cost_columns(df) if c not in skip]
+    scored: list[tuple[str, float]] = []
+    for col in df.columns:
+        if col in skip:
+            continue
+        if _header_looks_like_identifier_only(str(col)):
+            continue
+        ratio = _value_match_ratio(df, col, _cell_looks_like_monetary_value)
+        med = _median_monetary_sample(df, col)
+        if ratio < 0.36 or med is None:
+            continue
+        if med < 0.005 and max((_parse_monetary_cell(v) or 0) for v in df[col].iloc[: min(len(df), _VALUE_SAMPLE_CAP)]) < 1.0:
+            continue
+        scored.append((col, ratio))
+    scored.sort(key=lambda x: (-x[1], str(x[0])))
+    by_value = [c for (c, _) in scored]
+    merged = list(dict.fromkeys(by_header + [c for c in by_value if c not in by_header]))
+    if not merged and by_value:
+        merged = by_value[: min(5, len(by_value))]
+    value_only = len(by_header) == 0 and len(merged) > 0
+    return (merged, value_only)
 
 OS_COLUMN_NONE_OPTION: str = '— No OS column (Linux pricing for all rows) —'
 
@@ -162,7 +260,12 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
     os_scored = _score_os_columns(df)
     (inst_col, inst_amb, inst_ui) = _resolve_best_column(df, inst_scored)
     (os_col, os_amb, os_ui) = _resolve_os_column(df, os_scored)
-    cost_c = find_cost_columns(df)
+    skip_for_cost: set[str] = set()
+    if inst_col is not None and (not inst_amb):
+        skip_for_cost.add(inst_col)
+    if os_col is not None and (not os_amb):
+        skip_for_cost.add(os_col)
+    (cost_c, cost_inferred_values) = find_cost_columns_combined(df, skip_for_cost)
     needs_cost_pick = len(cost_c) > 1
     needs_i = inst_amb or inst_col is None
     needs_o = os_amb
@@ -178,6 +281,8 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
         warnings.append('No cost/spend/amount column auto-detected — savings will be N/A without selection.')
     elif len(cost_c) > 1:
         warnings.append(f'Multiple cost-like columns found ({len(cost_c)}) — please choose Actual Cost column.')
+    elif cost_inferred_values:
+        warnings.append('Cost column inferred from numeric values — confirm it is the spend you want for savings %.')
     binding: ColumnBinding | None = None
     if not needs_i and (not needs_o) and inst_col is not None:
         binding = ColumnBinding(instance=inst_col, os=os_col, actual_cost=cost_c[0] if len(cost_c) == 1 else None)
