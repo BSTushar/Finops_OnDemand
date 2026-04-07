@@ -134,7 +134,9 @@ def _canonical_core_for_key(
         return nk
     cores = _extract_core_tokens(nk)
     if not cores:
-        return None
+        # Fallback to exact normalized key equality when no strict core token exists
+        # (e.g., purely numeric IDs). This is still strict equality only.
+        return nk
     if len(cores) > 1 and nk not in multi_warned:
         multi_warned.add(nk)
         warnings.append(
@@ -319,6 +321,9 @@ def merge_primary_with_secondary(
             for c in d1_base_cols:
                 v1 = r1[c]
                 if not _is_empty_cell(v1):
+                    row[c] = v1
+                elif c == key_left:
+                    # Never backfill the primary key from D2.
                     row[c] = v1
                 elif r2b is not None and c in d2.columns:
                     row[c] = r2b[c]
