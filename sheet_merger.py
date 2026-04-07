@@ -1,9 +1,10 @@
 from __future__ import annotations
-from collections import Counter, defaultdict
+from collections import Counter
 import logging
 import re
 import pandas as pd
 from data_loader import require_unique_column_names
+from pandas.testing import assert_series_equal
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,48 @@ def _flag_column_names(d1_columns: list) -> tuple[str, str, str]:
     return (out[0], out[1], out[2])
 
 
+def _validate_merge_output(
+    *,
+    d1_original: pd.DataFrame,
+    out: pd.DataFrame,
+    key_left: str,
+    out_cols: list[str],
+    extra_cols: list[str],
+) -> None:
+    if key_left not in out.columns:
+        raise RuntimeError(f"Merge validation failed: primary key column '{key_left}' is missing.")
+    if len(out) != len(d1_original):
+        raise RuntimeError('Merge validation failed: row count changed from primary dataset.')
+    if list(out.columns) != out_cols:
+        raise RuntimeError('Merge validation failed: output columns differ from expected primary+extra+flags order.')
+    bad_suffix_cols = [c for c in out.columns if str(c).endswith('_x') or str(c).endswith('_y')]
+    if bad_suffix_cols:
+        raise RuntimeError(f'Merge validation failed: unexpected merge-suffix columns: {bad_suffix_cols!r}.')
+    for c in d1_original.columns:
+        src = d1_original[c]
+        dst = out[c]
+        keep_mask = ~src.map(_is_empty_cell)
+        if not bool(keep_mask.any()):
+            continue
+        try:
+            assert_series_equal(
+                dst.loc[keep_mask].reset_index(drop=True),
+                src.loc[keep_mask].reset_index(drop=True),
+                check_dtype=False,
+                check_exact=True,
+                check_names=False,
+            )
+        except AssertionError as exc:
+            raise RuntimeError(
+                f"Merge validation failed: non-empty primary values changed for column {c!r}."
+            ) from exc
+    for c in extra_cols:
+        if out[c].map(lambda v: v is None).any():
+            raise RuntimeError(
+                f"Merge validation failed: unexpected None values introduced in appended column {c!r}."
+            )
+
+
 def merge_primary_with_secondary(
     d1: pd.DataFrame,
     d2: pd.DataFrame,
@@ -193,6 +236,7 @@ def merge_primary_with_secondary(
     require_unique_column_names(d2.columns)
     d1 = d1.copy()
     d2 = d2.copy()
+    d1_original = d1.copy()
     d1_base_cols = list(d1.columns)
     d2_base_cols = list(d2.columns)
     d1_core_col = _helper_col_name(d1_base_cols + d2_base_cols, 'core_id')
@@ -214,13 +258,15 @@ def merge_primary_with_secondary(
             f'{rows_in_dup_groups} rows; only the first row per core_id is merged (see FinOps_Merge_* flags).'
         )
 
-    core_lists: dict[str, list[tuple[int, pd.Series]]] = defaultdict(list)
-
-    for idx, (_, br) in enumerate(d2.iterrows()):
+    d2_first_by_core: dict[str, pd.Series] = {}
+    d2_core_counts: Counter[str] = Counter()
+    for _, br in d2.iterrows():
         core2 = br[d2_core_col]
         if core2 is None:
             continue
-        core_lists[core2].append((idx, br))
+        d2_core_counts[core2] += 1
+        if core2 not in d2_first_by_core:
+            d2_first_by_core[core2] = br
 
     dup_primary_norm = {
         k
@@ -239,29 +285,32 @@ def merge_primary_with_secondary(
     rows: list[dict] = []
     unmatched = 0
 
+    warned_dup_core: set[str] = set()
+
     def _pick_one_match(
         core_id: str | None,
-    ) -> tuple[pd.Series | None, bool, str, bool]:
+    ) -> tuple[pd.Series | None, bool, str]:
         """
-        Returns (secondary_row_or_none, duplicate_secondary_suppressed, replica_label, matched_via_core_id).
+        Returns (secondary_row_or_none, duplicate_secondary_suppressed, replica_label).
         """
         if core_id is None:
-            return (None, False, '', False)
-        if core_id not in core_lists:
-            return (None, False, '', False)
-        cands = sorted(core_lists[core_id], key=lambda t: t[0])
-        chosen = cands[0]
-        if len(cands) > 1:
+            return (None, False, '')
+        row = d2_first_by_core.get(core_id)
+        if row is None:
+            return (None, False, '')
+        n = int(d2_core_counts.get(core_id, 1))
+        if n > 1 and core_id not in warned_dup_core:
+            warned_dup_core.add(core_id)
             warnings.append(
-                f'Multiple secondary rows share core_id {core_id!r} — using first row (index {chosen[0]}).'
+                f'Multiple secondary rows share core_id {core_id!r} — using first row.'
             )
             logger.warning('Merge: duplicate secondary core_id values; using first row.')
-        return (chosen[1], len(cands) > 1, f'1/{len(cands)}', True)
+        return (row, n > 1, f'1/{n}')
 
     for _, r1 in d1.iterrows():
         core1 = r1[d1_core_col]
         primary_dup = bool(core1 is not None and core1 in dup_primary_norm)
-        r2, sec_multi, rep_label, _via_core = _pick_one_match(core1)
+        r2, sec_multi, rep_label = _pick_one_match(core1)
         if core1 is not None and r2 is None:
             unmatched += 1
 
@@ -276,7 +325,8 @@ def merge_primary_with_secondary(
                 else:
                     row[c] = v1
             for c in extra_cols:
-                row[c] = r2b[c] if r2b is not None else pd.NA
+                v = r2b[c] if r2b is not None else pd.NA
+                row[c] = pd.NA if v is None else v
             row[fname_sec] = 'Yes' if sec_m else 'No'
             row[fname_rep] = rep_lbl
             row[fname_pp] = 'Yes' if primary_dup else 'No'
@@ -288,4 +338,11 @@ def merge_primary_with_secondary(
         warnings.append(f'Primary rows with no secondary match on core_id: {unmatched} (extra columns left blank).')
 
     out = pd.DataFrame(rows, columns=out_cols)
+    _validate_merge_output(
+        d1_original=d1_original,
+        out=out,
+        key_left=key_left,
+        out_cols=out_cols,
+        extra_cols=extra_cols,
+    )
     return (out, warnings)

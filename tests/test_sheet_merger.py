@@ -132,6 +132,37 @@ class TestMergePrimaryWithSecondary(unittest.TestCase):
         self.assertEqual(out.iloc[0]['y'], 'ok')
         self.assertFalse(any('fuzzy' in x.lower() for x in w))
 
+    def test_no_pandas_suffix_columns_added(self):
+        d1 = pd.DataFrame({'k': ['ab101'], 'Spend': [pd.NA], 'Cost': [10.0]})
+        d2 = pd.DataFrame({'k': ['ab101'], 'Spend': [22.0], 'Cost': [99.0]})
+        out, _ = merge_primary_with_secondary(d1, d2, 'k', 'k')
+        self.assertTrue(all(not str(c).endswith('_x') and not str(c).endswith('_y') for c in out.columns))
+        # Fill only missing in D1.
+        self.assertEqual(float(out.iloc[0]['Spend']), 22.0)
+        # Existing D1 value must not be overwritten.
+        self.assertEqual(float(out.iloc[0]['Cost']), 10.0)
+
+    def test_primary_columns_values_unchanged_when_non_empty(self):
+        d1 = pd.DataFrame(
+            {
+                'k': ['ab101', 'ab102'],
+                'A': ['x', 'y'],
+                'B': [1.0, 2.0],
+            }
+        )
+        d2 = pd.DataFrame(
+            {
+                'k': ['ab101', 'ab102'],
+                'A': ['override-x', 'override-y'],
+                'B': [10.0, 20.0],
+                'NewCol': ['n1', 'n2'],
+            }
+        )
+        out, _ = merge_primary_with_secondary(d1, d2, 'k', 'k')
+        self.assertEqual(out['A'].tolist(), ['x', 'y'])
+        self.assertEqual(out['B'].tolist(), [1.0, 2.0])
+        self.assertEqual(out['NewCol'].tolist(), ['n1', 'n2'])
+
 
 if __name__ == '__main__':
     unittest.main()
