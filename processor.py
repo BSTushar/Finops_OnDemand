@@ -182,11 +182,33 @@ def _discount_pct_vs_list(act: object, list_hourly: object) -> float | str:
     except (ArithmeticError, ZeroDivisionError, TypeError, ValueError):
         return NA
 
+def _column_name_looks_monthly(column_name: str | None) -> bool:
+    if column_name is None:
+        return False
+    cn = str(column_name).strip().lower()
+    if not cn:
+        return False
+    if ('month' in cn) or ('monthly' in cn):
+        return True
+    if re.search(r'\b(20\d{2})[ _/\-](0?[1-9]|1[0-2])\b', cn):
+        return True
+    if re.search(r'\b(0?[1-9]|1[0-2])[ _/\-](20\d{2})\b', cn):
+        return True
+    if re.search(
+        r'\b('
+        r'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|'
+        r'jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|'
+        r'oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
+        r')\b',
+        cn,
+    ):
+        return True
+    return False
+
 def _to_float(v, *, column_name: str | None=None) -> float | None:
     col_monthly = False
     if column_name is not None:
-        cn = str(column_name).strip().lower()
-        col_monthly = ('month' in cn) or ('monthly' in cn)
+        col_monthly = _column_name_looks_monthly(column_name)
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return None
     if isinstance(v, Decimal):
@@ -237,6 +259,48 @@ def _to_float(v, *, column_name: str | None=None) -> float | None:
     except (TypeError, ValueError):
         return None
 
+
+def _resolve_actual_cost_for_row(
+    row: pd.Series,
+    *,
+    selected_cost_col: str | None,
+    fallback_cost_cols: list[str] | None,
+) -> float | None:
+    """
+    Per-row actual cost resolver:
+    1) selected column first (e.g. latest monthly chosen in loader)
+    2) then fallback cost columns:
+       - month-like columns first (latest-first rank from loader)
+       - then non-month columns, rightmost valid fallback
+    """
+    seen_cols: set[str] = set()
+    if selected_cost_col:
+        v = _to_float(row.get(selected_cost_col), column_name=selected_cost_col)
+        if v is not None and v > 0:
+            return v
+        seen_cols.add(selected_cost_col)
+    if fallback_cost_cols:
+        month_cols: list[str] = []
+        non_month_cols: list[str] = []
+        for c in fallback_cost_cols:
+            if c in seen_cols:
+                continue
+            if _column_name_looks_monthly(c):
+                month_cols.append(c)
+            else:
+                non_month_cols.append(c)
+        # Prefer month-like columns in ranked order (latest-first from loader).
+        for c in month_cols:
+            v = _to_float(row.get(c), column_name=c)
+            if v is not None and v > 0:
+                return v
+        # Fallback: rightmost valid non-month column.
+        for c in reversed(non_month_cols):
+            v = _to_float(row.get(c), column_name=c)
+            if v is not None and v > 0:
+                return v
+    return None
+
 def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION, service: ServiceMode='both', cpu_filter: CPUFilterMode='both') -> pd.DataFrame:
     # CRITICAL: keep immutable baseline of the user input.
     original_df = df.copy()
@@ -259,6 +323,36 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     cc = binding.actual_cost
     cc_idx: int | None = _first_col_index(cols, cc) if (cc and any(c == cc for c in cols)) else None
     os_idx = _first_col_index(cols, binding.os) if binding.os is not None else None
+    # Optional dynamic fallback list for per-row cost resolution without hardcoding names.
+    fallback_cost_cols: list[str] = []
+    month_header_detector = None
+    try:
+        from data_loader import (
+            find_cost_columns_combined as _find_cost_columns_combined,
+            _rank_cost_columns as _rank_cost_columns,
+            _latest_month_from_header as _latest_month_from_header,
+        )
+        month_header_detector = _latest_month_from_header
+        _skip: set[str] = {binding.instance}
+        if binding.os is not None:
+            _skip.add(binding.os)
+        (det_cost_cols, _value_only) = _find_cost_columns_combined(work, _skip)
+        fallback_cost_cols = _rank_cost_columns(det_cost_cols)
+        # If no explicit binding cost column is selected, prefer the latest month-like cost column.
+        if cc is None:
+            month_cols = [c for c in fallback_cost_cols if _latest_month_from_header(c) is not None]
+            if month_cols:
+                cc = month_cols[0]
+                cc_idx = _first_col_index(cols, cc) if any(cn == cc for cn in cols) else None
+    except Exception:
+        fallback_cost_cols = []
+        month_header_detector = None
+    # Prioritize month-derived fallback columns from newest -> oldest for row-wise selection.
+    if month_header_detector is not None and fallback_cost_cols:
+        month_cols = [c for c in fallback_cost_cols if month_header_detector(c) is not None]
+        month_cols.sort(key=lambda c: month_header_detector(c), reverse=True)
+        non_month_cols = [c for c in fallback_cost_cols if c not in month_cols]
+        fallback_cost_cols = month_cols + non_month_cols
     if _finops_debug:
         logger.info(
             'FinOps enrichment (debug): rows=%s region=%s service=%s',
@@ -280,12 +374,13 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
         _raise_if_original_data_changed(original_df, df, context='processing')
         return final_df
     n = len(work)
-    actual_vals: list[float | None] = []
-    if cc_idx is not None:
-        raw_a = work.iloc[:, cc_idx].tolist()
-        actual_vals = [_to_float(x, column_name=cc) for x in raw_a]
-    else:
-        actual_vals = [None] * n
+    actual_vals: list[float | None] = [None] * n
+    for i in range(n):
+        actual_vals[i] = _resolve_actual_cost_for_row(
+            work.iloc[i],
+            selected_cost_col=cc,
+            fallback_cost_cols=fallback_cost_cols,
+        )
     inst_series = work.iloc[:, ins_idx]
     cur_p: list = [None] * n
     a1i: list = [None] * n

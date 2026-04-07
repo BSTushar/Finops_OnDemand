@@ -179,6 +179,68 @@ def _header_looks_like_sheet_price(h: object) -> bool:
     priceish = ('price' in n) or ('pricing' in n) or ('rate' in n) or ('unitprice' in n)
     costish = any((k in n for k in ('cost', 'spend', 'amount', 'charge', 'billing')))
     return bool(priceish and (not costish))
+
+
+def _is_empty_like(v: object) -> bool:
+    if v is None:
+        return True
+    try:
+        if pd.isna(v):
+            return True
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, str) and (not v.strip() or v.strip().lower() in ('nan', 'none', 'n/a')):
+        return True
+    return False
+
+
+def _cost_columns_priority(df: pd.DataFrame, candidates: list[str]) -> list[str]:
+    """
+    Priority for row-wise actual-cost extraction:
+    1) monthly headers by newest month first
+    2) all other cost-like columns, rightmost first
+    """
+    if not candidates:
+        return []
+    month_cols = [c for c in candidates if _latest_month_from_header(c) is not None]
+    month_cols_sorted = sorted(
+        month_cols,
+        key=lambda c: (_latest_month_from_header(c) or (0, 0)),
+        reverse=True,
+    )
+    others = [c for c in candidates if c not in month_cols_sorted]
+    idx = {c: i for i, c in enumerate(df.columns)}
+    others_sorted = sorted(others, key=lambda c: idx.get(c, -1), reverse=True)
+    return month_cols_sorted + others_sorted
+
+
+def cost_candidate_columns(df: pd.DataFrame, skip_cols: set[str] | None=None) -> list[str]:
+    """
+    Public helper for processor: dynamic cost-column candidates ordered for row-wise extraction.
+    """
+    (cost_c, _cost_inferred_values) = find_cost_columns_combined(df, skip_cols or set())
+    cost_c = _rank_cost_columns(cost_c)
+    return _cost_columns_priority(df, cost_c)
+
+
+def select_actual_cost_cell_for_row(
+    df: pd.DataFrame,
+    row_i: int,
+    ordered_cost_cols: list[str],
+) -> tuple[object | None, str | None]:
+    """
+    Per-row latest non-null cost:
+    - monthly candidates first (newest month first)
+    - fallback to rightmost valid non-month candidate
+    """
+    for c in ordered_cost_cols:
+        if c not in df.columns:
+            continue
+        v = df.iat[row_i, df.columns.get_loc(c)]
+        if _is_empty_like(v):
+            continue
+        return (v, c)
+    return (None, None)
 def _cell_looks_like_instance_type(cell: object) -> bool:
     if cell is None:
         return False
