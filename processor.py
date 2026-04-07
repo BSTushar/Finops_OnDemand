@@ -6,7 +6,7 @@ import re
 from decimal import Decimal
 from typing import Literal
 import pandas as pd
-from pandas.testing import assert_frame_equal
+from pandas.testing import assert_frame_equal, assert_series_equal
 from data_loader import ColumnBinding, require_unique_column_names
 from instance_api import canonicalize_instance_api_name
 from os_resolve import cell_matches_valid_os_pattern, classify_os_kind
@@ -430,6 +430,27 @@ def _raise_if_original_data_changed(original_df: pd.DataFrame, candidate_origina
         ) from exc
 
 
+def _raise_if_original_column_changed(
+    *,
+    original_col: pd.Series,
+    candidate_col: pd.Series,
+    column_name: str,
+    context: str,
+) -> None:
+    try:
+        assert_series_equal(
+            candidate_col,
+            original_col,
+            check_dtype=True,
+            check_exact=True,
+            check_names=True,
+        )
+    except AssertionError as exc:
+        raise RuntimeError(
+            f'Data integrity violation: original column {column_name!r} changed during {context}.'
+        ) from exc
+
+
 def _validate_final_integrity(
     *,
     original_df: pd.DataFrame,
@@ -449,6 +470,18 @@ def _validate_final_integrity(
     if list(final_df.columns) != expected_cols:
         raise RuntimeError(
             'Data integrity violation: original column order changed or FinOps insertion point is wrong.'
+        )
+    for orig_idx, col_name in enumerate(original_df.columns):
+        final_idx = orig_idx if orig_idx <= ins_idx else orig_idx + len(new_cols)
+        if final_df.columns[final_idx] != col_name:
+            raise RuntimeError(
+                f'Data integrity violation: original column {col_name!r} moved during final merge.'
+            )
+        _raise_if_original_column_changed(
+            original_col=original_df.iloc[:, orig_idx],
+            candidate_col=final_df.iloc[:, final_idx],
+            column_name=str(col_name),
+            context='final merge',
         )
     reconstructed_original = pd.concat(
         [
