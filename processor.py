@@ -182,7 +182,11 @@ def _discount_pct_vs_list(act: object, list_hourly: object) -> float | str:
     except (ArithmeticError, ZeroDivisionError, TypeError, ValueError):
         return NA
 
-def _to_float(v) -> float | None:
+def _to_float(v, *, column_name: str | None=None) -> float | None:
+    col_monthly = False
+    if column_name is not None:
+        cn = str(column_name).strip().lower()
+        col_monthly = ('month' in cn) or ('monthly' in cn)
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return None
     if isinstance(v, Decimal):
@@ -202,6 +206,11 @@ def _to_float(v) -> float | None:
         s = v.strip()
         if not s or s.lower() in ('nan', 'n/a', '-', ''):
             return None
+        s_low = s.lower()
+        val_monthly = ('/month' in s_low) or ('per month' in s_low) or ('monthly' in s_low)
+        s = re.sub(r'(?i)\s*/\s*month\b', '', s)
+        s = re.sub(r'(?i)\bper\s+month\b', '', s)
+        s = re.sub(r'(?i)\bmonthly\b', '', s)
         s = re.sub(r'^[\$€£]\s*', '', s)
         s = s.replace(',', '')
         s = s.strip()
@@ -213,12 +222,18 @@ def _to_float(v) -> float | None:
             return None
         if pd.isna(x) or not math.isfinite(x):
             return None
-        return x
+        out = x
+        if col_monthly or val_monthly:
+            out = out / 730.0
+        return out
     try:
         x = float(v)
         if pd.isna(x) or not math.isfinite(x):
             return None
-        return x
+        out = x
+        if col_monthly:
+            out = out / 730.0
+        return out
     except (TypeError, ValueError):
         return None
 
@@ -268,7 +283,7 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     actual_vals: list[float | None] = []
     if cc_idx is not None:
         raw_a = work.iloc[:, cc_idx].tolist()
-        actual_vals = [_to_float(x) for x in raw_a]
+        actual_vals = [_to_float(x, column_name=cc) for x in raw_a]
     else:
         actual_vals = [None] * n
     inst_series = work.iloc[:, ins_idx]
