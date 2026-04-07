@@ -174,7 +174,7 @@ class TestNonPositiveActualCost(unittest.TestCase):
         lr = analyze_load(df, [])
         b = ColumnBinding(instance=lr.binding.instance, os=lr.binding.os, actual_cost=lr.binding.actual_cost)
         out = apply_na_fill(process(lr.df, b, region='eu-west-1'))
-        self.assertEqual(out['Actual Cost ($)'].iloc[0], 'N/A')
+        self.assertTrue(pd.isna(out['Actual Cost ($)'].iloc[0]))
         self.assertNotEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
         self.assertNotEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')
 

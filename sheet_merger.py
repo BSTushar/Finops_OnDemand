@@ -35,9 +35,10 @@ FLAG_DUP_SECONDARY = 'FinOps_Merge_DuplicateSecondaryRows'
 FLAG_SECONDARY_REPLICA = 'FinOps_Merge_SecondaryRowGroupIndex'
 FLAG_DUP_PRIMARY_KEY = 'FinOps_Merge_DuplicatePrimaryKey'
 
-# Core id: one ASCII letter + ≥3 digits; must not extend further digits (avoids matching a101 inside a1011).
-_CORE_ID_RE = re.compile(r'[a-z][0-9]{3,}(?![0-9])')
-_FULL_CORE_RE = re.compile(r'^[a-z][0-9]{3,}$')
+# Core id token: one or more letters followed by one or more digits.
+# Boundaries avoid partial/alphanumeric-overlap matches (e.g. no "ab101" match inside "ab1011").
+_CORE_ID_TOKEN_RE = re.compile(r'(?<![a-z0-9])([a-z]+[0-9]+)(?![a-z0-9])')
+_FULL_CORE_RE = re.compile(r'^[a-z]+[0-9]+$')
 
 
 def _norm_header(name: str) -> str:
@@ -111,10 +112,10 @@ def _norm_key_value(v: object) -> str | None:
 
 
 def _extract_core_tokens(norm: str) -> list[str]:
-    """All core-id tokens in norm (left-to-right, non-overlapping regex findall)."""
+    """All strict core-id tokens in norm (left-to-right, non-overlapping)."""
     if not norm:
         return []
-    return _CORE_ID_RE.findall(norm)
+    return _CORE_ID_TOKEN_RE.findall(norm)
 
 
 def _canonical_core_for_key(
@@ -123,8 +124,8 @@ def _canonical_core_for_key(
     multi_warned: set[str],
 ) -> str | None:
     """
-    Single derived id for matching: full value if it is already a core id; else leftmost extracted token.
-    No substring heuristics — only explicit [a-z][0-9]{3,}(?![0-9]) tokens.
+    Single derived id for matching: full value if it is already a core id;
+    otherwise leftmost extracted strict token [a-z]+[0-9]+.
     """
     if not nk:
         return None
@@ -143,6 +144,14 @@ def _canonical_core_for_key(
             'Merge: multiple core ids in key value; using leftmost (value prefix omitted).'
         )
     return cores[0]
+
+
+def _helper_col_name(existing_cols: list[str], base: str) -> str:
+    taken = set(existing_cols)
+    name = base
+    while name in taken:
+        name = f'_{name}_'
+    return name
 
 
 def _flag_column_names(d1_columns: list) -> tuple[str, str, str]:
@@ -167,11 +176,12 @@ def merge_primary_with_secondary(
     Build D3: all D1 columns in order, then columns only in D2, then merge flag columns.
 
     Matching (deterministic, one secondary row per primary row at most):
-    1. Normalized exact key (lowercase, stripped).
-    2. Else derived core id from pattern [a-z][0-9]{3,} with no extra trailing digit — embedded
-       tokens only via regex (not naive substring).
-    If several secondary rows tie: prefer secondary row whose normalized key equals the primary key;
-    else lowest original secondary row index. Warnings are recorded; output row count equals D1.
+    - derive normalized strict core_id from both keys:
+      * lowercase + trim first
+      * full token or embedded token [a-z]+[0-9]+ only
+    - merge on core_id equality only (no fuzzy/partial matching).
+    - if several secondary rows share same core_id, use first row by original order.
+    Output row count always equals D1 row count.
     """
     warnings: list[str] = []
     multi_warned: set[str] = set()
@@ -183,102 +193,81 @@ def merge_primary_with_secondary(
     require_unique_column_names(d2.columns)
     d1 = d1.copy()
     d2 = d2.copy()
+    d1_base_cols = list(d1.columns)
+    d2_base_cols = list(d2.columns)
+    d1_core_col = _helper_col_name(d1_base_cols + d2_base_cols, 'core_id')
+    d2_core_col = _helper_col_name(d1_base_cols + d2_base_cols + [d1_core_col], 'core_id')
+    d1[d1_core_col] = [
+        _canonical_core_for_key(_norm_key_value(v), warnings, multi_warned) for v in d1[key_left]
+    ]
+    d2[d2_core_col] = [
+        _canonical_core_for_key(_norm_key_value(v), warnings, multi_warned) for v in d2[key_right]
+    ]
 
-    cnt_d2 = Counter((_norm_key_value(x) for x in d2[key_right]))
-    dup_keys_d2 = {k for k, v in cnt_d2.items() if k is not None and v > 1}
+    cnt_d2 = Counter((x for x in d2[d2_core_col] if x is not None))
+    dup_keys_d2 = {k for k, v in cnt_d2.items() if v > 1}
     n_secondary_dup_groups = len(dup_keys_d2)
     rows_in_dup_groups = sum(cnt_d2[k] for k in dup_keys_d2)
     if n_secondary_dup_groups:
         warnings.append(
-            f'Secondary dataset: {n_secondary_dup_groups} normalized merge key value(s) repeat — '
-            f'{rows_in_dup_groups} rows; only the first row per key is merged (see FinOps_Merge_* flags).'
+            f'Secondary dataset: {n_secondary_dup_groups} core_id value(s) repeat — '
+            f'{rows_in_dup_groups} rows; only the first row per core_id is merged (see FinOps_Merge_* flags).'
         )
 
-    exact_lists: dict[str, list[tuple[int, pd.Series]]] = defaultdict(list)
-    core_to_rows: dict[str, list[tuple[int, pd.Series, str]]] = defaultdict(list)
+    core_lists: dict[str, list[tuple[int, pd.Series]]] = defaultdict(list)
 
     for idx, (_, br) in enumerate(d2.iterrows()):
-        nk2 = _norm_key_value(br[key_right])
-        if nk2 is None:
+        core2 = br[d2_core_col]
+        if core2 is None:
             continue
-        exact_lists[nk2].append((idx, br))
-        core2 = _canonical_core_for_key(nk2, warnings, multi_warned)
-        if core2 is not None:
-            core_to_rows[core2].append((idx, br, nk2))
+        core_lists[core2].append((idx, br))
 
     dup_primary_norm = {
         k
-        for (k, n) in Counter((_norm_key_value(x) for x in d1[key_left])).items()
+        for (k, n) in Counter((x for x in d1[d1_core_col])).items()
         if k is not None and n > 1
     }
     if dup_primary_norm:
         warnings.append(
-            f'Primary dataset: {len(dup_primary_norm)} merge key value(s) repeat on multiple rows — '
+            f'Primary dataset: {len(dup_primary_norm)} core_id value(s) repeat on multiple rows — '
             'rows are not removed; see duplicate-primary flag column.'
         )
 
-    (fname_sec, fname_rep, fname_pp) = _flag_column_names(list(d1.columns))
-    extra_cols = [c for c in d2.columns if c not in d1.columns]
-    out_cols = list(d1.columns) + extra_cols + [fname_sec, fname_rep, fname_pp]
+    (fname_sec, fname_rep, fname_pp) = _flag_column_names(d1_base_cols)
+    extra_cols = [c for c in d2_base_cols if c not in d1_base_cols]
+    out_cols = d1_base_cols + extra_cols + [fname_sec, fname_rep, fname_pp]
     rows: list[dict] = []
     unmatched = 0
-    extracted_hits = 0
 
     def _pick_one_match(
-        nk: str | None,
+        core_id: str | None,
     ) -> tuple[pd.Series | None, bool, str, bool]:
         """
         Returns (secondary_row_or_none, duplicate_secondary_suppressed, replica_label, matched_via_core_id).
         """
-        if nk is None:
+        if core_id is None:
             return (None, False, '', False)
-        if nk in exact_lists:
-            cands = sorted(exact_lists[nk], key=lambda t: t[0])
-            if len(cands) > 1:
-                warnings.append(
-                    f'Multiple secondary rows share exact merge key {nk!r} — using first row (index {cands[0][0]}).'
-                )
-                logger.warning('Merge: duplicate secondary exact keys; using first row.')
-            return (cands[0][1], len(cands) > 1, f'1/{len(cands)}', False)
-
-        core1 = _canonical_core_for_key(nk, warnings, multi_warned)
-        if core1 is None or core1 not in core_to_rows:
+        if core_id not in core_lists:
             return (None, False, '', False)
-        cands = core_to_rows[core1]
-        # Prefer secondary rows whose full normalized key is exactly the core (e.g. a1011 vs asas_a1011_x).
-        bare_first = sorted([(i, r, n2) for i, r, n2 in cands if n2 == core1], key=lambda t: t[0])
-        if bare_first:
-            chosen = bare_first[0]
-            if len(bare_first) > 1:
-                warnings.append(
-                    f'Multiple secondary rows match core id {core1!r} as exact key — '
-                    f'using first row (index {chosen[0]}).'
-                )
-                logger.warning('Merge: multiple bare-id secondary rows for same core; using first.')
-            return (chosen[1], len(bare_first) > 1, f'1/{len(bare_first)}', True)
-
-        sorted_c = sorted(cands, key=lambda t: t[0])
-        chosen = sorted_c[0]
-        if len(sorted_c) > 1:
+        cands = sorted(core_lists[core_id], key=lambda t: t[0])
+        chosen = cands[0]
+        if len(cands) > 1:
             warnings.append(
-                f'Multiple secondary rows share extracted core id {core1!r} — using first row (index {chosen[0]}).'
+                f'Multiple secondary rows share core_id {core_id!r} — using first row (index {chosen[0]}).'
             )
-            logger.warning('Merge: multiple secondary rows for extracted core; using first.')
-        return (chosen[1], len(sorted_c) > 1, f'1/{len(sorted_c)}', True)
+            logger.warning('Merge: duplicate secondary core_id values; using first row.')
+        return (chosen[1], len(cands) > 1, f'1/{len(cands)}', True)
 
     for _, r1 in d1.iterrows():
-        nk = _norm_key_value(r1[key_left])
-        primary_dup = bool(nk is not None and nk in dup_primary_norm)
-        r2, sec_multi, rep_label, via_core = _pick_one_match(nk)
-        if via_core and r2 is not None:
-            extracted_hits += 1
-
-        if nk is not None and r2 is None:
+        core1 = r1[d1_core_col]
+        primary_dup = bool(core1 is not None and core1 in dup_primary_norm)
+        r2, sec_multi, rep_label, _via_core = _pick_one_match(core1)
+        if core1 is not None and r2 is None:
             unmatched += 1
 
         def _emit_one(r2b: pd.Series | None, sec_m: bool, rep_lbl: str) -> None:
             row: dict = {}
-            for c in d1.columns:
+            for c in d1_base_cols:
                 v1 = r1[c]
                 if not _is_empty_cell(v1):
                     row[c] = v1
@@ -295,13 +284,8 @@ def merge_primary_with_secondary(
 
         _emit_one(r2, sec_multi, rep_label)
 
-    if extracted_hits:
-        warnings.append(
-            f'Matched {extracted_hits} primary row(s) using extracted core id '
-            r'(pattern [a-z] + ≥3 digits, no trailing digit); verify joins.'
-        )
     if unmatched:
-        warnings.append(f'Primary rows with no secondary match on key: {unmatched} (extra columns left blank).')
+        warnings.append(f'Primary rows with no secondary match on core_id: {unmatched} (extra columns left blank).')
 
     out = pd.DataFrame(rows, columns=out_cols)
     return (out, warnings)

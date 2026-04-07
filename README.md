@@ -76,8 +76,8 @@ open http://localhost:8501
 |---|---|
 | **Guided UI** | Numbered steps, hero headline, trust card, pill buttons |
 | File upload | CSV, XLSX, XLS |
-| **Fix Your Sheet** | Optional merge on a common ID: **exact** normalized key first, then **core id** tokens (`[a-z]` + ≥3 digits, no false partials); one output row per primary row (`sheet_merger.py`) |
-| Auto column detection | Broad header hints; manual mapping when ambiguous |
+| **Fix Your Sheet** | Optional merge on a common ID using strict **core_id** equality only: token pattern `[a-z]+[0-9]+` (e.g. `ab101` matches `aasss_ab101`, but not `ab10` / `xy101`); one output row per primary row (`sheet_merger.py`) |
+| Auto column detection | Dynamic detection (no fixed names): instance via header + AWS API value shape, OS via value patterns; manual mapping when ambiguous |
 | Pricing | Local static lists, 4 regions (no live Pricing API) |
 | Service modes | EC2-only, RDS-only, or both |
 | CPU modes | Default, Intel, Graviton, or both |
@@ -88,7 +88,7 @@ open http://localhost:8501
 | **Discount %** | After **Actual Cost ($)** — compares actual to **Current Price ($/hr)** (N/A / No Discount / 1 decimal); use when actual is comparable to hourly list (e.g. effective $/hr) |
 | Export | Excel (disclaimer + metadata rows) + CSV (table only) |
 | Scale | Tested 10k+ rows |
-| Security posture | App pricing logic uses **local** datasets only (no `requests`/`urllib` in tool `.py`) |
+| Security posture | Runtime pricing/enrichment uses **local** datasets only (no live AWS Pricing API calls) |
 
 ---
 
@@ -111,6 +111,12 @@ Merge **flag** columns (`FinOps_Merge_*`) appear only when using **Fix Your Shee
 
 All **original** columns stay in place around this inserted block.
 
+Data integrity is enforced with strict runtime validation:
+- original columns remain present
+- original column order remains unchanged
+- original values/dtypes remain unchanged
+- any mismatch raises an error (fail-fast)
+
 ---
 
 ## Pricing Regions
@@ -122,19 +128,23 @@ All **original** columns stay in place around this inserted block.
 | `ap-south-1` | Asia Pacific (Mumbai) | |
 | `eu-central-1` | EU (Frankfurt) | |
 
-All prices verified from AWS On-Demand pricing page, March 2025.
+All list prices are resolved from bundled local datasets. Hourly lookups are pinned to `eu-west-1` (Ireland) in the enrichment engine.
 
 ---
 
 ## File Format
 
-Minimum required columns: **Instance Type**, **OS**
+Minimum required input: a detectable **instance** column (AWS API-style values like `m5.large` / `db.r5.large`).
+
+OS column is optional:
+- if detected from values (`linux` / `unix` / `ubuntu` / `rhel` / `amazon linux` / `windows` / `win`), it is used
+- if missing, pricing defaults to Linux
 
 Optional (auto-detected): Cost, Usage, Region, Account, Application
 
-Accepts 50+ column name variants (case-insensitive):
-- `instance type`, `instancetype`, `ec2 type`, `type` → Instance Type
-- `os`, `platform`, `operating system` → OS
+Accepts varied column names (case-insensitive); detection is dynamic:
+- instance headers commonly include keywords such as `api`, `instance`, `vm`, `type`, then validated by AWS API-style values
+- OS is detected primarily from cell values (e.g. Product/System columns), not fixed header names
 - `cost`, `monthly cost`, `spend`, `blended cost` → Cost
 - `usage`, `hours`, `running hours` → Usage
 - `region`, `location`, `aws region` → Region
@@ -169,8 +179,8 @@ finops_tool/
 
 ## Notes
 
-- Prices are verified AWS On-Demand Linux prices. Always validate against the
-  current AWS Pricing API before making purchasing decisions.
+- Prices are indicative on-demand list prices from local bundled datasets.
+  Validate against invoices / billing systems before making purchasing decisions.
 - Graviton (ARM) recommendations assume workload compatibility. Validate
   OS and runtime support before migrating.
 - The tool never guesses prices: unknown instance types return N/A.
