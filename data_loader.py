@@ -4,11 +4,13 @@ import math
 import os
 import re
 import statistics
+import logging
 from dataclasses import dataclass, field
 from typing import BinaryIO
 import pandas as pd
 from instance_api import canonicalize_instance_api_name
 from os_resolve import cell_matches_valid_os_pattern
+logger = logging.getLogger(__name__)
 _VALUE_SAMPLE_CAP = 2000
 _MIN_AUTO_CONF = 0.48
 _TIE_BAND = 0.09
@@ -53,6 +55,7 @@ def _norm_header(name: str) -> str:
     s = re.sub('\\s+', ' ', s)
     return s
 INSTANCE_HINTS: frozenset[str] = frozenset({'instance type', 'instancetype', 'instance', 'instance type id', 'ec2 type', 'ec2type', 'ec2 type id', 'instance size', 'resource type', 'vm type', 'vm size', 'vmsize', 'ec2 instance type', 'instance class', 'db instance class', 'database class', 'compute class', 'computeclass', 'instance type name', 'api name', 'ec2 api name', 'instance api name'})
+INSTANCE_HEADER_KEYWORDS: frozenset[str] = frozenset({'api', 'instance', 'vm', 'type'})
 COST_HINTS: frozenset[str] = frozenset({
     'cost', 'monthly cost', 'total cost', 'charge', 'charges', 'cost ($)', 'cost(usd)', 'cost (usd)', 'cost_usd',
     'billed cost', 'blended cost', 'unblended cost', 'amortized cost', 'spend', 'amount', 'total amount',
@@ -67,6 +70,21 @@ def _header_matches(h: str, hints: frozenset[str]) -> bool:
         return True
     for hint in hints:
         if len(hint) >= 4 and hint in n:
+            return True
+    return False
+
+
+def _instance_header_keyword_hit(h: str) -> bool:
+    """
+    Airbus compatibility rule:
+    header keywords api / instance / vm / type should boost instance-column detection.
+    """
+    n = _norm_header(h)
+    if not n:
+        return False
+    tokens = [t for t in n.split(' ') if t]
+    for token in tokens:
+        if token in INSTANCE_HEADER_KEYWORDS:
             return True
     return False
 def _cell_looks_like_instance_type(cell: object) -> bool:
@@ -96,12 +114,13 @@ def _value_match_ratio(df: pd.DataFrame, col: str, predicate) -> float:
 def _score_instance_columns(df: pd.DataFrame) -> list[tuple[str, float]]:
     scored: list[tuple[str, float]] = []
     for col in df.columns:
-        hdr = _header_matches(str(col), INSTANCE_HINTS)
+        hdr = _header_matches(str(col), INSTANCE_HINTS) or _instance_header_keyword_hit(str(col))
         vr = _value_match_ratio(df, col, _cell_looks_like_instance_type)
         if hdr and vr >= 0.25:
-            sc = 0.5 + 0.5 * min(1.0, vr / 0.95)
+            sc = 0.6 + 0.4 * min(1.0, vr / 0.95)
         elif hdr:
-            sc = 0.45 + 0.15 * min(1.0, vr * 3.0) if vr > 0 else 0.44
+            # Header-only hits are not enough to auto-accept without value-pattern support.
+            sc = 0.42 + 0.2 * min(1.0, vr * 3.0) if vr > 0 else 0.30
         else:
             sc = vr
         scored.append((col, min(1.0, sc)))
@@ -320,6 +339,8 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
     os_scored = _score_os_columns(df)
     (inst_col, inst_amb, inst_ui) = _resolve_best_column(df, inst_scored)
     (os_col, os_amb, os_ui) = _resolve_os_column(df, os_scored)
+    logger.info('instance_col = %s', inst_col if inst_col is not None else 'None')
+    logger.info('os_col = %s', os_col if os_col is not None else 'None')
     skip_for_cost: set[str] = set()
     if inst_col is not None and (not inst_amb):
         skip_for_cost.add(inst_col)
