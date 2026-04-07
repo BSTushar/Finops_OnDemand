@@ -179,7 +179,7 @@ class TestExtremeEdges(unittest.TestCase):
         df = pd.DataFrame({'Instance': ['m5.large'], 'OS': ['linux']})
         lr = finalize_binding(analyze_load(df, []), 'Instance', 'OS', None)
         out = apply_na_fill(process(lr.df, lr.binding, region='eu-west-1'))
-        self.assertEqual(out['Actual Cost ($)'].iloc[0], 'N/A')
+        self.assertTrue(pd.isna(out['Actual Cost ($)'].iloc[0]))
         self.assertEqual(out['Discount %'].iloc[0], 'N/A')
         self.assertNotEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
         self.assertNotEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')

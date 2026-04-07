@@ -49,9 +49,24 @@ class TestUserPortfolioCsvFixture(unittest.TestCase):
     def test_original_columns_and_values_preserved(self) -> None:
         for c in self._df.columns:
             self.assertIn(c, self._out.columns)
-        # spot-check first row instance cell unchanged
-        r = self._out[self._out['RecordID'].astype(str) == '601'].iloc[0]
-        self.assertEqual(r['Instance_Type'], 'm5.large')
+        # Strict check: all original values/columns preserved exactly.
+        cols = list(self._df.columns)
+        ix = cols.index('Instance_Type')
+        reconstructed = pd.concat(
+            [
+                self._out.iloc[:, : ix + 1].copy(),
+                self._out.iloc[:, ix + 1 + len(INSERT_COLS) :].copy(),
+            ],
+            axis=1,
+        )
+        reconstructed.columns = cols
+        pd.testing.assert_frame_equal(
+            reconstructed,
+            self._df,
+            check_dtype=True,
+            check_exact=True,
+            check_names=True,
+        )
 
     def test_m5_large_linux_list_price_matches_bundle(self) -> None:
         rid = self._out[self._out['RecordID'].astype(str) == '601'].iloc[0]

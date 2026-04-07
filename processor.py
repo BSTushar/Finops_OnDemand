@@ -6,6 +6,7 @@ import re
 from decimal import Decimal
 from typing import Literal
 import pandas as pd
+from pandas.testing import assert_frame_equal
 from data_loader import ColumnBinding, require_unique_column_names
 from instance_api import canonicalize_instance_api_name
 from os_resolve import cell_matches_valid_os_pattern, classify_os_kind
@@ -34,6 +35,17 @@ ALT2_NO_DISTINCT = 'N/A (No distinct alternative)'
 # Windows on EC2 does not offer Graviton (Arm) in the same way as Linux; block Graviton alts.
 ALT2_INCOMPATIBLE_OS = 'N/A (No compatible alternative)'
 _PRICING_WINDOWS_LABEL = 'Windows'
+NA_FILL_COLS: tuple[str, ...] = (
+    'Pricing OS',
+    'Discount %',
+    'Current Price ($/hr)',
+    'Alt1 Instance',
+    'Alt1 Price ($/hr)',
+    'Alt1 Savings %',
+    'Alt2 Instance',
+    'Alt2 Price ($/hr)',
+    'Alt2 Savings %',
+)
 
 def _first_col_index(cols: list, name: str) -> int:
     for i, c in enumerate(cols):
@@ -211,7 +223,9 @@ def _to_float(v) -> float | None:
         return None
 
 def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION, service: ServiceMode='both', cpu_filter: CPUFilterMode='both') -> pd.DataFrame:
-    cols = list(df.columns)
+    # CRITICAL: keep immutable baseline of the user input.
+    original_df = df.copy()
+    cols = list(original_df.columns)
     require_unique_column_names(cols)
     _reserved = frozenset(INSERT_COLS)
     _bad = [c for c in cols if c in _reserved]
@@ -225,7 +239,7 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
         ins_idx = _first_col_index(cols, binding.instance)
     except ValueError as exc:
         raise ValueError('Instance column not in DataFrame.') from exc
-    work = df.copy()
+    work = original_df.copy()
     _finops_debug = os.environ.get('FINOPS_DEBUG', '').strip().lower() in ('1', 'true', 'yes')
     cc = binding.actual_cost
     cc_idx: int | None = _first_col_index(cols, cc) if (cc and any(c == cc for c in cols)) else None
@@ -238,10 +252,18 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             service,
         )
     if work.empty:
-        left = work.iloc[:, : ins_idx + 1].copy()
-        right = work.iloc[:, ins_idx + 1 :].copy()
-        mid = pd.DataFrame({c: pd.Series(index=work.index, dtype=object) for c in INSERT_COLS})
-        return pd.concat([left, mid, right], axis=1)
+        left = original_df.iloc[:, : ins_idx + 1].copy()
+        right = original_df.iloc[:, ins_idx + 1 :].copy()
+        finops_block = pd.DataFrame({c: pd.Series(index=original_df.index, dtype=object) for c in INSERT_COLS})
+        final_df = pd.concat([left, finops_block, right], axis=1)
+        _validate_final_integrity(
+            original_df=original_df,
+            final_df=final_df,
+            ins_idx=ins_idx,
+            new_cols=INSERT_COLS,
+        )
+        _raise_if_original_data_changed(original_df, df, context='processing')
+        return final_df
     n = len(work)
     actual_vals: list[float | None] = []
     if cc_idx is not None:
@@ -262,7 +284,8 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     cpu: CPUFilterMode = cpu_filter if cpu_filter in ('default', 'intel', 'graviton', 'both') else 'both'
     row_na_fallback_count = 0
     _price_region = PRICING_LOOKUP_REGION
-    assert _price_region == 'eu-west-1', 'Hourly pricing must use eu-west-1 bundled SKU table'
+    if _price_region != 'eu-west-1':
+        raise RuntimeError('Hourly pricing must use eu-west-1 bundled SKU table')
     for i in range(n):
         raw_inst = inst_series.iloc[i]
         raw_inst_norm = normalize_instance_string(raw_inst)
@@ -348,8 +371,6 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             p_txt = f'{pj:.6f}' if isinstance(pj, (int, float)) and math.isfinite(float(pj)) else 'N/A'
             print(f'[FinOps DEBUG] {inst_j} {os_j} {PRICING_LOOKUP_REGION} {p_txt}', flush=True)
     discount_out = [_discount_pct_vs_list(act_out[i], cur_p[i]) for i in range(n)]
-    left = work.iloc[:, :ins_idx + 1].copy()
-    right = work.iloc[:, ins_idx + 1:].copy()
     _mid_lists = [
         pricing_os_out,
         act_out,
@@ -362,25 +383,24 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
         a2p,
         a2s,
     ]
-    assert len(_mid_lists) == len(INSERT_COLS), 'INSERT_COLS / mid row mismatch'
-    mid = pd.DataFrame(dict(zip(INSERT_COLS, _mid_lists)), index=work.index)
-    out = pd.concat([left, mid, right], axis=1)
-    assert len(out) == len(work), 'Row count changed'
-    assert len(out.columns) == len(work.columns) + len(INSERT_COLS), 'Column count wrong'
-    _expected_cols = list(work.columns[: ins_idx + 1]) + INSERT_COLS + list(work.columns[ins_idx + 1 :])
-    assert list(out.columns) == _expected_cols, 'Original columns must appear in the same order with enrichment inserted after the instance column only'
-    assert list(out.columns[: ins_idx + 1]) == list(work.columns[: ins_idx + 1])
-    assert list(out.columns[ins_idx + 1 + len(INSERT_COLS) :]) == list(work.columns[ins_idx + 1 :])
-    for k in range(ins_idx + 1):
-        assert out.iloc[:, k].tolist() == work.iloc[:, k].tolist(), 'mutated leading column'
-    for k in range(ins_idx + 1, len(work.columns)):
-        j = k + len(INSERT_COLS)
-        assert out.iloc[:, j].tolist() == work.iloc[:, k].tolist(), 'mutated original trailing'
+    if len(_mid_lists) != len(INSERT_COLS):
+        raise RuntimeError('Data integrity violation: FinOps insert column mismatch.')
+    finops_block = pd.DataFrame(dict(zip(INSERT_COLS, _mid_lists)), index=original_df.index)
+    left = original_df.iloc[:, :ins_idx + 1].copy()
+    right = original_df.iloc[:, ins_idx + 1:].copy()
+    final_df = pd.concat([left, finops_block, right], axis=1)
+    _validate_final_integrity(
+        original_df=original_df,
+        final_df=final_df,
+        ins_idx=ins_idx,
+        new_cols=INSERT_COLS,
+    )
+    _raise_if_original_data_changed(original_df, df, context='processing')
     if row_na_fallback_count:
         logger.info('FinOps enrichment: %s row(s) returned N/A fallback (invalid or unsupported row data).', row_na_fallback_count)
     if _finops_debug:
-        logger.info('FinOps enrichment finished rows=%s', len(out))
-    return out
+        logger.info('FinOps enrichment finished rows=%s', len(final_df))
+    return final_df
 
 def _na_like(x: object) -> bool:
     if x is None:
@@ -392,9 +412,58 @@ def _na_like(x: object) -> bool:
     return False
 
 
+def _raise_if_original_data_changed(original_df: pd.DataFrame, candidate_original: pd.DataFrame, *, context: str) -> None:
+    """
+    Fail fast if any original column/value changed (exact equality with dtype/column names).
+    """
+    try:
+        assert_frame_equal(
+            candidate_original,
+            original_df,
+            check_dtype=True,
+            check_exact=True,
+            check_names=True,
+        )
+    except AssertionError as exc:
+        raise RuntimeError(
+            f'Data integrity violation: original dataframe changed during {context}.'
+        ) from exc
+
+
+def _validate_final_integrity(
+    *,
+    original_df: pd.DataFrame,
+    final_df: pd.DataFrame,
+    ins_idx: int,
+    new_cols: list[str],
+) -> None:
+    if len(final_df) != len(original_df):
+        raise RuntimeError('Data integrity violation: row count changed.')
+    expected_col_count = len(original_df.columns) + len(new_cols)
+    if len(final_df.columns) != expected_col_count:
+        raise RuntimeError(
+            f'Data integrity violation: column count mismatch '
+            f'({len(final_df.columns)} != {expected_col_count}).'
+        )
+    expected_cols = list(original_df.columns[: ins_idx + 1]) + new_cols + list(original_df.columns[ins_idx + 1 :])
+    if list(final_df.columns) != expected_cols:
+        raise RuntimeError(
+            'Data integrity violation: original column order changed or FinOps insertion point is wrong.'
+        )
+    reconstructed_original = pd.concat(
+        [
+            final_df.iloc[:, : ins_idx + 1].copy(),
+            final_df.iloc[:, ins_idx + 1 + len(new_cols) :].copy(),
+        ],
+        axis=1,
+    )
+    reconstructed_original.columns = original_df.columns
+    _raise_if_original_data_changed(original_df, reconstructed_original, context='final merge')
+
+
 def apply_na_fill(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    for c in INSERT_COLS:
+    for c in NA_FILL_COLS:
         if c not in df.columns:
             continue
         df[c] = df[c].apply(lambda x: NA if _na_like(x) else x)
