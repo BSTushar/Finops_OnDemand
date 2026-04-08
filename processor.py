@@ -434,6 +434,9 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     pricing_os_out: list[str] = [LINUX_FALLBACK_LABEL] * n
     cpu: CPUFilterMode = cpu_filter if cpu_filter in ('default', 'intel', 'graviton', 'both') else 'both'
     row_na_fallback_count = 0
+    # V2 perf guardrail: cache repeat lookups across identical row contexts.
+    rec_cache: dict[tuple[str, str, CPUFilterMode], tuple[str | None, str | None]] = {}
+    price_cache: dict[tuple[str, str, str, str], float | None] = {}
     for i in range(n):
         raw_inst = inst_series.iloc[i]
         raw_inst_norm = normalize_instance_string(raw_inst)
@@ -462,9 +465,11 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 a1s[i] = a2s[i] = NA
                 continue
             backend = _pricing_backend(inst)
-            rec = get_rds_recommendations(inst, cpu_filter=cpu) if backend == 'rds' else get_recommendations(inst, cpu_filter=cpu)
-            alt1 = rec.get('alt1')
-            alt2 = rec.get('alt2')
+            rec_key = (inst, backend, cpu)
+            if rec_key not in rec_cache:
+                rec = get_rds_recommendations(inst, cpu_filter=cpu) if backend == 'rds' else get_recommendations(inst, cpu_filter=cpu)
+                rec_cache[rec_key] = (rec.get('alt1'), rec.get('alt2'))
+            (alt1, alt2) = rec_cache[rec_key]
             win_blocked_graviton_alt2 = False
             if pricing_os_out[i] == _PRICING_WINDOWS_LABEL:
                 if alt1 and _is_graviton_instance_api(alt1):
@@ -476,9 +481,24 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 alt2 = None
             row_region_raw = _row_region_value(work, i, cols, ins_idx, cc_idx)
             row_region = _region_for_pricing(row_region_raw, default_region=region)
-            p_cur = _hourly_cur(inst, os_engine, backend, region=row_region)
-            p_a1 = _hourly_alt(alt1, os_engine, backend, region=row_region)
-            p_a2 = _hourly_alt(alt2, os_engine, backend, region=row_region)
+            cur_key = (inst, os_engine, backend, row_region)
+            if cur_key not in price_cache:
+                price_cache[cur_key] = _hourly_cur(inst, os_engine, backend, region=row_region)
+            p_cur = price_cache[cur_key]
+            if alt1 is not None:
+                a1_key = (normalize_instance_string(alt1), os_engine, backend, row_region)
+                if a1_key not in price_cache:
+                    price_cache[a1_key] = _hourly_alt(alt1, os_engine, backend, region=row_region)
+                p_a1 = price_cache[a1_key]
+            else:
+                p_a1 = None
+            if alt2 is not None:
+                a2_key = (normalize_instance_string(alt2), os_engine, backend, row_region)
+                if a2_key not in price_cache:
+                    price_cache[a2_key] = _hourly_alt(alt2, os_engine, backend, region=row_region)
+                p_a2 = price_cache[a2_key]
+            else:
+                p_a2 = None
             cur_p[i] = p_cur
             a1i[i] = alt1 if alt1 is not None else NA
             if alt2 is not None:

@@ -1164,6 +1164,45 @@ def _series_savings_pct(col_name: str, df: pd.DataFrame) -> pd.Series:
     return pd.to_numeric(pd.Series(raw), errors='coerce').dropna()
 
 
+def _compute_quality_report(df: pd.DataFrame) -> dict[str, object]:
+    report: dict[str, object] = {}
+    total = int(len(df))
+    report['total_rows'] = total
+    if total == 0:
+        report['na_current_rows'] = 0
+        report['na_alt1_rows'] = 0
+        report['na_alt2_rows'] = 0
+        report['no_discount_rows'] = 0
+        report['no_savings_rows'] = 0
+        report['na_reason_counts'] = {}
+        return report
+    cur = df.get('Current Price ($/hr)', pd.Series([pd.NA] * total))
+    alt1 = df.get('Alt1 Instance', pd.Series([pd.NA] * total))
+    alt2 = df.get('Alt2 Instance', pd.Series([pd.NA] * total))
+    disc = df.get('Discount %', pd.Series([pd.NA] * total))
+    a1s = df.get('Alt1 Savings %', pd.Series([pd.NA] * total))
+    report['na_current_rows'] = int((cur.astype(str) == 'N/A').sum())
+    report['na_alt1_rows'] = int((alt1.astype(str) == 'N/A').sum())
+    report['na_alt2_rows'] = int((alt2.astype(str) == 'N/A').sum())
+    report['no_discount_rows'] = int((disc.astype(str) == 'No Discount').sum())
+    report['no_savings_rows'] = int((a1s.astype(str) == 'No Savings').sum())
+    reasons: dict[str, int] = {}
+    for i in range(total):
+        c = str(cur.iloc[i]).strip()
+        a1 = str(alt1.iloc[i]).strip()
+        if c == 'N/A':
+            if a1 in ('N/A', 'nan', 'None'):
+                key = 'No current SKU (invalid or unsupported row context)'
+            else:
+                key = 'Current SKU missing, alt suggestion exists'
+            reasons[key] = reasons.get(key, 0) + 1
+        elif a1 == 'N/A':
+            key = 'No compatible alternative'
+            reasons[key] = reasons.get(key, 0) + 1
+    report['na_reason_counts'] = dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])))
+    return report
+
+
 def _old_generation_detail_table(df: pd.DataFrame, inst_col: str | None) -> pd.DataFrame:
     """Rows in the current view whose instance cell matches the older-gen family heuristic (same as red KPI)."""
     if not inst_col or inst_col not in df.columns or df.empty:
@@ -1189,6 +1228,43 @@ def _old_generation_detail_table(df: pd.DataFrame, inst_col: str | None) -> pd.D
     return out
 
 
+def _na_reason_counts(df: pd.DataFrame) -> pd.DataFrame:
+    reasons = {
+        'Invalid/unknown instance API name': int((df.get('Current Price ($/hr)') == 'N/A').sum())
+        if 'Current Price ($/hr)' in df.columns else 0,
+        'No Alt1 recommendation/price': int((df.get('Alt1 Instance') == 'N/A').sum())
+        if 'Alt1 Instance' in df.columns else 0,
+        'No Alt2 recommendation/price': int((df.get('Alt2 Instance') == 'N/A').sum())
+        if 'Alt2 Instance' in df.columns else 0,
+        'Discount unavailable (missing/invalid actual or price)': int((df.get('Discount %') == 'N/A').sum())
+        if 'Discount %' in df.columns else 0,
+    }
+    out = pd.DataFrame(
+        [{'Reason': k, 'Rows': int(v)} for (k, v) in reasons.items() if int(v) > 0]
+    )
+    if out.empty:
+        return pd.DataFrame(columns=['Reason', 'Rows'])
+    out.sort_values('Rows', ascending=False, inplace=True)
+    out.reset_index(drop=True, inplace=True)
+    return out
+
+
+def _diagnostics_summary(df: pd.DataFrame) -> dict[str, object]:
+    total = int(len(df))
+    cur_na = int((df['Current Price ($/hr)'] == 'N/A').sum()) if 'Current Price ($/hr)' in df.columns else 0
+    a1_na = int((df['Alt1 Instance'] == 'N/A').sum()) if 'Alt1 Instance' in df.columns else 0
+    a2_na = int((df['Alt2 Instance'] == 'N/A').sum()) if 'Alt2 Instance' in df.columns else 0
+    disc_na = int((df['Discount %'] == 'N/A').sum()) if 'Discount %' in df.columns else 0
+    return {
+        'total_rows': total,
+        'cur_na_rows': cur_na,
+        'alt1_na_rows': a1_na,
+        'alt2_na_rows': a2_na,
+        'discount_na_rows': disc_na,
+        'na_reason_table': _na_reason_counts(df),
+    }
+
+
 def kpis(df: pd.DataFrame) -> dict:
     s1 = _series_savings_pct('Alt1 Savings %', df)
     s2 = _series_savings_pct('Alt2 Savings %', df)
@@ -1198,6 +1274,58 @@ def kpis(df: pd.DataFrame) -> dict:
         'max1': float(s1.max()) if len(s1) else None,
         'max2': float(s2.max()) if len(s2) else None,
         'act_col': 'Actual Cost ($)' in df.columns,
+    }
+
+
+def _diagnostics_report(df: pd.DataFrame) -> dict[str, object]:
+    total_rows = int(len(df))
+    invalid_instance_rows = 0
+    missing_current_price_rows = 0
+    missing_alt_rows = 0
+    missing_actual_rows = 0
+    reasons: dict[str, int] = {}
+    if total_rows == 0:
+        return {
+            'total_rows': 0,
+            'resolved_rows': 0,
+            'unresolved_rows': 0,
+            'reason_counts': {},
+        }
+    inst_col = _resolve_instance_column_for_view(df, None)
+    cur_col = 'Current Price ($/hr)' if 'Current Price ($/hr)' in df.columns else None
+    alt1_col = 'Alt1 Instance' if 'Alt1 Instance' in df.columns else None
+    alt2_col = 'Alt2 Instance' if 'Alt2 Instance' in df.columns else None
+    act_col = 'Actual Cost ($)' if 'Actual Cost ($)' in df.columns else None
+    for _i, row in df.iterrows():
+        reason = None
+        inst_val = row.get(inst_col) if inst_col is not None else None
+        if canonicalize_instance_api_name(inst_val) is None:
+            invalid_instance_rows += 1
+            reason = 'Invalid instance API name'
+        cur_val = row.get(cur_col) if cur_col else None
+        if reason is None and (cur_val == 'N/A' or pd.isna(cur_val)):
+            missing_current_price_rows += 1
+            reason = 'Missing current price for row context'
+        if reason is None and alt1_col and alt2_col:
+            a1 = row.get(alt1_col)
+            a2 = row.get(alt2_col)
+            if (a1 == 'N/A' or pd.isna(a1)) and (a2 == 'N/A' or pd.isna(a2)):
+                missing_alt_rows += 1
+                reason = 'No compatible alternatives'
+        if reason is None and act_col:
+            av = row.get(act_col)
+            if pd.isna(av):
+                missing_actual_rows += 1
+                reason = 'Missing actual cost value'
+        if reason is not None:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    unresolved_rows = int(sum(reasons.values()))
+    resolved_rows = total_rows - unresolved_rows
+    return {
+        'total_rows': total_rows,
+        'resolved_rows': resolved_rows,
+        'unresolved_rows': unresolved_rows,
+        'reason_counts': dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))),
     }
 
 
@@ -1574,6 +1702,26 @@ if df_out is not None:
             render_kpis(kpis(view))
         except Exception as ex:
             log.warning('Results KPI strip skipped: %s', type(ex).__name__)
+        with st.expander('Validation report (v2 preview)', expanded=False):
+            try:
+                rep = _validation_report(df_out, view)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric('Rows (output)', f"{rep['rows_out']:,}")
+                c2.metric('Rows shown', f"{rep['rows_view']:,}")
+                c3.metric('Current Price N/A', f"{rep['current_na']:,}")
+                c4.metric('Alt1 N/A', f"{rep['alt1_na']:,}")
+                st.caption(
+                    f"Region column detected: {rep['region_col']}; "
+                    f"unique row regions in output: {rep['distinct_regions_out']}"
+                )
+                top = rep['top_na_reasons']
+                if top:
+                    st.markdown('Top N/A reasons:')
+                    st.table(pd.DataFrame(top, columns=['Reason', 'Rows']))
+                else:
+                    st.success('No N/A rows detected in key pricing/recommendation fields.')
+            except Exception as ex:
+                log.warning('Validation report render skipped: %s', type(ex).__name__)
 
         df_display = _enriched_table_for_display(view)
         st.markdown('<div id="finops-enriched-df-anchor"></div>', unsafe_allow_html=True)
@@ -1591,7 +1739,7 @@ if df_out is not None:
 elif lr is None:
     st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Start at step 1</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Upload a spreadsheet and click <strong>Continue</strong>. Steps 2–4 appear after that.</p></div>', unsafe_allow_html=True)
 elif not binding_ready:
-    st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Finish step 2</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Complete column mapping (and pick a cost column if asked), then go to step 3.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="finops-card"><p class="finops-card-title" style="margin:0;">Finish step 2</p><p class="finops-card-body" style="margin:0.5rem 0 0;">Complete column mapping, then go to step 3.</p></div>', unsafe_allow_html=True)
 st.markdown(
     '<footer class="finops-page-footer" role="contentinfo">'
     '<span class="finops-page-footer-brand">FinOps Optimizer</span>'
