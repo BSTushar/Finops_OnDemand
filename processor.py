@@ -222,6 +222,96 @@ def _to_float(v) -> float | None:
     except (TypeError, ValueError):
         return None
 
+
+def _norm_header(name: object) -> str:
+    s = str(name).strip().lower()
+    s = re.sub(r'[_\-]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+
+_MONTH_HDR_RE = re.compile(
+    r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b|\b20\d{2}[-_/ ]?(?:0?[1-9]|1[0-2])\b',
+    re.IGNORECASE,
+)
+
+
+def _cost_header_kind(name: object) -> str:
+    """
+    Lightweight cost-header classifier for row-wise actual cost fallback.
+    Kinds: month, ri, on_demand, total, other.
+    """
+    n = _norm_header(name)
+    if _MONTH_HDR_RE.search(n):
+        return 'month'
+    if 'on demand' in n or 'ondemand' in n:
+        return 'on_demand'
+    if re.search(r'\bri\b', n) or 'reserved instance' in n or 'reservation' in n:
+        return 'ri'
+    if 'total cost' in n or n.startswith('total '):
+        return 'total'
+    return 'other'
+
+
+def _resolve_actual_cost_for_row(
+    row: pd.Series,
+    *,
+    selected_cost_col: str | None,
+    fallback_cost_cols: list[str],
+) -> float | None:
+    """
+    Resolve row-wise actual cost with non-zero preference and safe fallback.
+
+    Priority:
+    1) Selected cost column (if > 0)
+    2) Month-like columns
+    3) If selected RI is zero/missing -> prefer On Demand (and vice versa)
+    4) Remaining RI / On Demand / Total / other cost candidates
+    """
+    seen: set[str] = set()
+    candidates: list[str] = []
+    if selected_cost_col is not None:
+        candidates.append(selected_cost_col)
+        seen.add(selected_cost_col)
+    for c in fallback_cost_cols:
+        if c in seen:
+            continue
+        candidates.append(c)
+        seen.add(c)
+
+    def _pos_value(col: str) -> float | None:
+        v = _to_float(row.get(col))
+        if v is None or not math.isfinite(v) or v <= 0:
+            return None
+        return v
+
+    if selected_cost_col is not None:
+        sv = _pos_value(selected_cost_col)
+        if sv is not None:
+            return sv
+
+    month_cols = [c for c in candidates if _cost_header_kind(c) == 'month']
+    ri_cols = [c for c in candidates if _cost_header_kind(c) == 'ri']
+    od_cols = [c for c in candidates if _cost_header_kind(c) == 'on_demand']
+    total_cols = [c for c in candidates if _cost_header_kind(c) == 'total']
+    other_cols = [c for c in candidates if _cost_header_kind(c) == 'other']
+
+    selected_kind = _cost_header_kind(selected_cost_col) if selected_cost_col is not None else 'other'
+    if selected_kind == 'ri':
+        fallback_order = month_cols + od_cols + ri_cols + total_cols + other_cols
+    elif selected_kind == 'on_demand':
+        fallback_order = month_cols + ri_cols + od_cols + total_cols + other_cols
+    else:
+        fallback_order = month_cols + ri_cols + od_cols + total_cols + other_cols
+
+    for c in fallback_order:
+        if selected_cost_col is not None and c == selected_cost_col:
+            continue
+        v = _pos_value(c)
+        if v is not None:
+            return v
+    return None
+
 def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION, service: ServiceMode='both', cpu_filter: CPUFilterMode='both') -> pd.DataFrame:
     # CRITICAL: keep immutable baseline of the user input.
     original_df = df.copy()
@@ -244,6 +334,17 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     cc = binding.actual_cost
     cc_idx: int | None = _first_col_index(cols, cc) if (cc and any(c == cc for c in cols)) else None
     os_idx = _first_col_index(cols, binding.os) if binding.os is not None else None
+    fallback_cost_cols: list[str] = []
+    try:
+        from data_loader import find_cost_columns_combined as _find_cost_columns_combined, _rank_cost_columns as _rank_cost_columns
+
+        _skip: set[str] = {binding.instance}
+        if binding.os is not None:
+            _skip.add(binding.os)
+        (det_cost_cols, _value_only) = _find_cost_columns_combined(work, _skip)
+        fallback_cost_cols = _rank_cost_columns(det_cost_cols)
+    except Exception:
+        fallback_cost_cols = []
     if _finops_debug:
         logger.info(
             'FinOps enrichment (debug): rows=%s region=%s service=%s',
@@ -265,12 +366,14 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
         _raise_if_original_data_changed(original_df, df, context='processing')
         return final_df
     n = len(work)
-    actual_vals: list[float | None] = []
-    if cc_idx is not None:
-        raw_a = work.iloc[:, cc_idx].tolist()
-        actual_vals = [_to_float(x) for x in raw_a]
-    else:
-        actual_vals = [None] * n
+    actual_vals: list[float | None] = [
+        _resolve_actual_cost_for_row(
+            work.iloc[i],
+            selected_cost_col=cc,
+            fallback_cost_cols=fallback_cost_cols,
+        )
+        for i in range(n)
+    ]
     inst_series = work.iloc[:, ins_idx]
     cur_p: list = [None] * n
     a1i: list = [None] * n
