@@ -64,6 +64,69 @@ def savings_numeric(v) -> float | None:
         return None
 
 
+def _is_na_like(v: object) -> bool:
+    if v is None:
+        return True
+    try:
+        if pd.isna(v):
+            return True
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, str):
+        s = v.strip().lower()
+        return s in ('', 'n/a', 'nan', 'none')
+    return False
+
+
+def _validation_report_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame(index=df.index)
+    out['row_index'] = df.index.astype(int)
+    if 'Current Price ($/hr)' not in df.columns:
+        out['na_reason'] = 'No current price column in output'
+        return out
+    out['current_price'] = df['Current Price ($/hr)']
+    out['alt1_instance'] = df['Alt1 Instance'] if 'Alt1 Instance' in df.columns else pd.NA
+    out['alt1_price'] = df['Alt1 Price ($/hr)'] if 'Alt1 Price ($/hr)' in df.columns else pd.NA
+    out['alt2_instance'] = df['Alt2 Instance'] if 'Alt2 Instance' in df.columns else pd.NA
+    out['alt2_price'] = df['Alt2 Price ($/hr)'] if 'Alt2 Price ($/hr)' in df.columns else pd.NA
+
+    if 'Pricing OS' in df.columns:
+        out['pricing_os'] = df['Pricing OS']
+
+    # Best-effort source columns for context in diagnostics.
+    region_col = next((c for c in df.columns if str(c).strip().lower() == 'region'), None)
+    if region_col is not None:
+        out['row_region'] = df[region_col]
+    inst_col = next(
+        (
+            c
+            for c in df.columns
+            if str(c).strip().lower() in ('inst_type', 'instance', 'instance type', 'api name')
+        ),
+        None,
+    )
+    if inst_col is not None:
+        out['instance_value'] = df[inst_col]
+
+    reasons: list[str] = []
+    for i in df.index:
+        cur = df.at[i, 'Current Price ($/hr)']
+        a1i = df.at[i, 'Alt1 Instance'] if 'Alt1 Instance' in df.columns else pd.NA
+        a1p = df.at[i, 'Alt1 Price ($/hr)'] if 'Alt1 Price ($/hr)' in df.columns else pd.NA
+        a2i = df.at[i, 'Alt2 Instance'] if 'Alt2 Instance' in df.columns else pd.NA
+        a2p = df.at[i, 'Alt2 Price ($/hr)'] if 'Alt2 Price ($/hr)' in df.columns else pd.NA
+        if _is_na_like(cur):
+            reasons.append('Missing current SKU in local pricing')
+        elif (not _is_na_like(a1i) and _is_na_like(a1p)) or (not _is_na_like(a2i) and _is_na_like(a2p)):
+            reasons.append('Missing alternative SKU in local pricing')
+        elif _is_na_like(a1i) and _is_na_like(a2i):
+            reasons.append('No compatible alternative')
+        else:
+            reasons.append('OK')
+    out['na_reason'] = reasons
+    return out
+
+
 def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> bytes:
     buf = io.BytesIO()
     preamble_rows = 4
@@ -155,4 +218,28 @@ def build_excel(df: pd.DataFrame, region_label: str, pricing_region_id: str) -> 
         ws_m.append(['Dataset as-of', _last_updated_utc().strftime('%Y-%m-%d')])
         ws_m.append(['Pricing OS handling', PRICING_OS_METADATA_NOTE])
         ws_m.append(['Rows (data)', len(safe_df)])
+        # Validation report: quick run-health summary + row-level reason labels.
+        report = _validation_report_df(safe_df)
+        ws_v = wb.create_sheet('Validation Report')
+        ws_v.append(['Metric', 'Value'])
+        ws_v.append(['Rows (data)', len(safe_df)])
+        if 'Current Price ($/hr)' in safe_df.columns:
+            cur_na = int(safe_df['Current Price ($/hr)'].map(_is_na_like).sum())
+            ws_v.append(['Rows with Current Price = N/A', cur_na])
+        if 'Alt1 Instance' in safe_df.columns:
+            a1_na = int(safe_df['Alt1 Instance'].map(_is_na_like).sum())
+            ws_v.append(['Rows with Alt1 Instance = N/A', a1_na])
+        if 'Alt2 Instance' in safe_df.columns:
+            a2_na = int(safe_df['Alt2 Instance'].map(_is_na_like).sum())
+            ws_v.append(['Rows with Alt2 Instance = N/A', a2_na])
+        ws_v.append([])
+        ws_v.append(['Top reason', 'Count'])
+        reason_counts = report['na_reason'].value_counts(dropna=False).to_dict()
+        for reason, cnt in reason_counts.items():
+            ws_v.append([str(reason), int(cnt)])
+        ws_v.append([])
+        ws_v.append(['Row diagnostics (below)'])
+        ws_v.append(list(report.columns))
+        for row in report.itertuples(index=False, name=None):
+            ws_v.append(list(row))
     return buf.getvalue()
