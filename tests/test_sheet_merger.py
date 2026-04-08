@@ -132,6 +132,24 @@ class TestMergePrimaryWithSecondary(unittest.TestCase):
         self.assertEqual(out.iloc[0]['y'], 'ok')
         self.assertFalse(any('fuzzy' in x.lower() for x in w))
 
+    def test_non_calc_columns_never_become_none(self):
+        d1 = pd.DataFrame(
+            {
+                'Application Code': ['ab101', 'ab102'],
+                'Owner Name': ['Alice', 'Bob'],   # unrelated to FinOps calculations
+                'API Name': ['m5.large', 'm6i.large'],
+            }
+        )
+        d2 = pd.DataFrame(
+            {
+                'Instance Id': ['x_ab101', 'x_ab102'],
+                'Instance details': ['foo', 'bar'],
+            }
+        )
+        out, _ = merge_primary_with_secondary(d1, d2, 'Application Code', 'Instance Id')
+        self.assertEqual(out['Owner Name'].tolist(), ['Alice', 'Bob'])
+        self.assertFalse(out['Owner Name'].map(lambda v: v is None).any())
+
     def test_no_pandas_suffix_columns_added(self):
         d1 = pd.DataFrame({'k': ['ab101'], 'Spend': [pd.NA], 'Cost': [10.0]})
         d2 = pd.DataFrame({'k': ['ab101'], 'Spend': [22.0], 'Cost': [99.0]})

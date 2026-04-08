@@ -189,6 +189,11 @@ def _validate_merge_output(
     for c in d1_original.columns:
         src = d1_original[c]
         dst = out[c]
+        bad_none_mask = (~src.map(_is_empty_cell)) & dst.map(lambda v: v is None)
+        if bool(bad_none_mask.any()):
+            raise RuntimeError(
+                f"Merge validation failed: non-empty primary values became None for column {c!r}."
+            )
         keep_mask = ~src.map(_is_empty_cell)
         if not bool(keep_mask.any()):
             continue
