@@ -1233,7 +1233,7 @@ st.markdown(f'''<div class="finops-hero"><div class="finops-hero-inner">
 <span class="finops-hero-badge finops-hero-badge--accent">EC2 &amp; RDS</span>
 <span class="finops-hero-badge">Internal use</span>
 </div>
-<p class="finops-tagline">Upload or merge files, confirm columns, run enrichment, then download Excel or CSV. Figures are indicative from on-demand list prices for your selected region — not invoices.</p>
+<p class="finops-tagline">Upload or merge files, confirm columns, run enrichment, then download Excel or CSV. Pricing is row-aware: each row uses its own region when present; step-1 region is fallback only.</p>
 <span class="{_pill_class}">{html.escape(pill)}</span>
 </div></div>''', unsafe_allow_html=True)
 finops_pipeline_slot = st.empty()
@@ -1300,14 +1300,14 @@ if _fix_mdf is not None:
         st.rerun()
 st.markdown('<div class="finops-divider finops-divider--section" role="separator" aria-hidden="true"></div>', unsafe_allow_html=True)
 with st.container(border=True):
-    _flow_step(1, 'Upload and set pricing', 'Add your file, choose region / service / CPU, then Continue. Your original column order is kept; we only append enrichment after the instance column.')
+    _flow_step(1, 'Upload and run settings', 'Add your file, choose default region / service / CPU, then Continue. Default region is used only when a row has no valid region value.')
     st.markdown('<div class="finops-sec">Spreadsheet</div>', unsafe_allow_html=True)
     uploaded = st.file_uploader('Drop your spreadsheet', type=['csv', 'xlsx', 'xls'], label_visibility='visible')
     st.caption('Needs a column with AWS API-style names (e.g. m5.large, db.r5.xlarge).')
     st.markdown('<div id="finops-home-toolbar-anchor"></div>', unsafe_allow_html=True)
     (reg_col, svc_col, cpu_col, go_col) = st.columns([2.5, 3.2, 2.0, 1.8], gap='medium')
     with reg_col:
-        st.markdown('<div class="finops-sec">Pricing region</div>', unsafe_allow_html=True)
+        st.markdown('<div class="finops-sec">Default region (row fallback)</div>', unsafe_allow_html=True)
         region_opts = [f'{label}  [{rid}]' for (rid, label) in SUPPORTED_REGIONS]
         default_idx = [r for (r, _) in SUPPORTED_REGIONS].index(DEFAULT_REGION)
         sel_disp = st.selectbox('region', region_opts, index=default_idx, label_visibility='collapsed')
@@ -1338,7 +1338,7 @@ _dec_s = html.escape(DECISION_SUPPORT_NOTE)
 _rds_s = html.escape(RDS_PRICING_NOTE)
 with st.container(border=True):
     st.markdown(f'''<div class="finops-card finops-trust-panel">
-<p class="finops-trust-preface">The region and snapshot below are what we use when you <strong>Run enrichment</strong> (step 3) and in Excel exports—not a live bill.</p>
+<p class="finops-trust-preface">Snapshot and defaults used by enrichment/export. Actual pricing is row-aware: each row region is used first; default region applies only if row region is missing/invalid.</p>
 <div class="finops-trust-snapshot" role="status">
 <div class="finops-trust-snapshot-head">
 <span class="finops-trust-snapshot-title">Pricing snapshot</span>
@@ -1359,8 +1359,9 @@ with st.container(border=True):
     with st.expander('Quick guide (same order as this page)', expanded=False):
         st.markdown(
             """
-**Step 1 — Upload and set pricing**  
-Pick **Pricing region** (list prices for that region), **Service** (**Both** is the default for mixed CURs — `db.*` rows always use RDS list SKUs), **CPU** (usually Both). Upload CSV or Excel, then **Continue**.
+**Step 1 — Upload and run settings**  
+Pick **Default region (row fallback)**, **Service** (**Both** is default for mixed data), and **CPU**.  
+If your file has a `region` column, each row uses that row’s region first. Upload CSV/Excel, then **Continue**.
 
 **Optional — Merge two files first** (at the top of the page, before step 1)  
 Skip if you already have one table. Merge on a shared ID, then **Use merged data** or upload the merged file in step 1.
@@ -1369,7 +1370,8 @@ Skip if you already have one table. Merge on a shared ID, then **Use merged data
 Choose **instance / DB class**, **OS or engine**, and **actual cost** when prompted. Cost drives meaningful savings %.
 
 **Step 3 — Run enrichment**  
-Uses your region + service + CPU. If you change those after enriching, click **Run enrichment** again.
+Uses row region + instance/class + OS/engine context. Default region is only fallback.  
+If you change service/CPU/default region after enriching, click **Run enrichment** again.
 
 **Step 4 — Results and download**  
 Filter the table, then **Excel** (disclaimers + metadata) or **CSV** (table only).
