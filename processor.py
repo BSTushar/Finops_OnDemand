@@ -63,6 +63,13 @@ _RDS_AZ_HEADER_HINTS: tuple[str, ...] = (
     'deployment',
     'az',
 )
+_REGION_RE = re.compile(r'\b[a-z]{2}-[a-z]+-\d\b')
+_REGION_HEADER_HINTS: tuple[str, ...] = (
+    'region',
+    'aws region',
+    'location',
+    'region id',
+)
 
 def _first_col_index(cols: list, name: str) -> int:
     for i, c in enumerate(cols):
@@ -155,6 +162,66 @@ def _classify_rds_az_mode(v: object) -> Literal['single', 'multi'] | None:
     return None
 
 
+def _normalize_region_token(v: object) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if not s or s in ('nan', 'none', 'n/a'):
+        return None
+    m = _REGION_RE.search(s)
+    if not m:
+        return None
+    return m.group(0)
+
+
+def _region_for_row(
+    work: pd.DataFrame,
+    row_i: int,
+    cols: list,
+    ins_idx: int,
+    cc_idx: int | None,
+) -> str:
+    """
+    Per-row pricing region:
+    - detect explicit region-id values from region-like headers/cells
+    - fallback to PRICING_LOOKUP_REGION when not detected/supported
+    """
+    detected: str | None = None
+    # Prefer region-like headers first.
+    for j, c in enumerate(cols):
+        if j == ins_idx:
+            continue
+        if cc_idx is not None and j == cc_idx:
+            continue
+        h = str(c).strip().lower()
+        if not any((hint in h for hint in _REGION_HEADER_HINTS)):
+            continue
+        v = work.iat[row_i, j]
+        if not _nonempty_cell(v):
+            continue
+        r = _normalize_region_token(v)
+        if r:
+            detected = r
+            break
+    # Fallback scan: any explicit region token in row.
+    if detected is None:
+        for j in range(len(cols)):
+            if j == ins_idx:
+                continue
+            if cc_idx is not None and j == cc_idx:
+                continue
+            v = work.iat[row_i, j]
+            if not _nonempty_cell(v):
+                continue
+            r = _normalize_region_token(v)
+            if r:
+                detected = r
+                break
+    if detected is None:
+        return PRICING_LOOKUP_REGION
+    return detected
+
+
 def _rds_row_engine_and_az(
     work: pd.DataFrame,
     row_i: int,
@@ -210,6 +277,21 @@ def _is_rds_context_supported(
         return False
     if az_explicit and az != 'single':
         return False
+    # If engine is provided in the mapped OS/engine column and is explicitly non-mysql,
+    # suppress RDS recommendation/pricing to avoid misleading output.
+    if not eng_explicit:
+        for j in range(len(cols)):
+            if j == ins_idx:
+                continue
+            if cc_idx is not None and j == cc_idx:
+                continue
+            h = str(cols[j]).strip().lower()
+            if h in ('product', 'os', 'engine', 'db engine', 'database engine'):
+                e = _normalize_rds_engine_token(work.iat[row_i, j])
+                if e is not None and e != 'mysql':
+                    return False
+                if e is not None:
+                    break
     return True
 
 
@@ -230,24 +312,24 @@ def _pricing_backend(inst: str) -> Literal['ec2', 'rds']:
     """Hourly + alt SKUs: db.* → RDS tables + rds_recommender; everything else → EC2."""
     return 'rds' if normalize_instance_string(inst).startswith('db.') else 'ec2'
 
-def _hourly_cur(inst: str, os_engine: str, backend: Literal['ec2', 'rds']) -> float | None:
-    """Always use PRICING_LOOKUP_REGION (eu-west-1) for on-demand hourly SKUs."""
+def _hourly_cur(inst: str, os_engine: str, backend: Literal['ec2', 'rds'], *, region: str) -> float | None:
+    """Use detected per-row region for on-demand hourly SKUs when supported."""
     inst_key = normalize_instance_string(inst)
     if not inst_key:
         return None
     if backend == 'rds':
         # Bundled RDS table is MySQL Single-AZ class rates (Linux-oriented); use linux key for lookup.
-        return get_rds_hourly(inst_key, region=PRICING_LOOKUP_REGION, os='linux')
-    return get_price(inst_key, region=PRICING_LOOKUP_REGION, os=os_engine)
+        return get_rds_hourly(inst_key, region=region, os='linux')
+    return get_price(inst_key, region=region, os=os_engine)
 
 
-def _hourly_alt(alt: str | None, os_engine: str, backend: Literal['ec2', 'rds']) -> float | None:
+def _hourly_alt(alt: str | None, os_engine: str, backend: Literal['ec2', 'rds'], *, region: str) -> float | None:
     if not alt or not isinstance(alt, str):
         return None
     a = str(alt).strip()
     if a in (NA, ALT2_NO_DISTINCT, ALT2_INCOMPATIBLE_OS) or not a or a.lower() in ('nan', 'none'):
         return None
-    return _hourly_cur(normalize_instance_string(alt), os_engine, backend)
+    return _hourly_cur(normalize_instance_string(alt), os_engine, backend, region=region)
 
 
 def _family_token_from_instance(api_name: str) -> str:
@@ -617,7 +699,10 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                     alt2 = None
             if alt1 and alt2 and (alt1 == alt2):
                 alt2 = None
-            p_cur = _hourly_cur(inst, os_engine, backend)
+            row_region = _region_for_row(work, i, cols, ins_idx, cc_idx)
+            if row_region not in ('eu-west-1', 'us-east-1', 'ap-south-1', 'eu-central-1'):
+                row_region = PRICING_LOOKUP_REGION
+            p_cur = _hourly_cur(inst, os_engine, backend, region=row_region)
             # For both EC2 and RDS, only show alternatives when current list price exists.
             # This avoids "alt shown but prices/savings are N/A" confusion.
             if p_cur is None:
@@ -626,16 +711,16 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 p_a1 = None
                 p_a2 = None
             else:
-                p_a1 = _hourly_alt(alt1, os_engine, backend)
-                p_a2 = _hourly_alt(alt2, os_engine, backend)
+                p_a1 = _hourly_alt(alt1, os_engine, backend, region=row_region)
+                p_a2 = _hourly_alt(alt2, os_engine, backend, region=row_region)
                 # For both EC2 and RDS, suppress alternatives with no local price.
                 if alt1 is not None and p_a1 is None:
                     alt1 = None
                 if alt2 is not None and p_a2 is None:
                     alt2 = None
                 # Recompute prices after suppression.
-                p_a1 = _hourly_alt(alt1, os_engine, backend)
-                p_a2 = _hourly_alt(alt2, os_engine, backend)
+                p_a1 = _hourly_alt(alt1, os_engine, backend, region=row_region)
+                p_a2 = _hourly_alt(alt2, os_engine, backend, region=row_region)
             cur_p[i] = p_cur
             a1i[i] = alt1 if alt1 is not None else NA
             if alt2 is not None:
