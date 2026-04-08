@@ -47,6 +47,23 @@ NA_FILL_COLS: tuple[str, ...] = (
     'Alt2 Savings %',
 )
 
+_RDS_ENGINE_HEADER_HINTS: tuple[str, ...] = (
+    'db engine',
+    'database engine',
+    'engine',
+)
+_RDS_AZ_HEADER_HINTS: tuple[str, ...] = (
+    'availability zone',
+    'availability_zone',
+    'avail zone',
+    'avail_zone',
+    'multi-az',
+    'multi az',
+    'multi_az',
+    'deployment',
+    'az',
+)
+
 def _first_col_index(cols: list, name: str) -> int:
     for i, c in enumerate(cols):
         if c == name:
@@ -90,6 +107,110 @@ def _raw_os_cell_for_row(
         if cell_matches_valid_os_pattern(v) or classify_os_kind(v) is not None:
             return v
     return None
+
+
+def _normalize_rds_engine_token(v: object) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if not s or s in ('nan', 'none', 'n/a'):
+        return None
+    if 'mysql' in s:
+        return 'mysql'
+    if 'mariadb' in s:
+        return 'mariadb'
+    if 'postgres' in s:
+        return 'postgres'
+    if 'oracle' in s:
+        return 'oracle'
+    if 'sql server' in s or 'sqlserver' in s or 'mssql' in s:
+        return 'sqlserver'
+    if 'aurora' in s:
+        return 'aurora'
+    return None
+
+
+def _classify_rds_az_mode(v: object) -> Literal['single', 'multi'] | None:
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return 'multi' if v else 'single'
+    s = str(v).strip().lower()
+    if not s or s in ('nan', 'none', 'n/a'):
+        return None
+    if s in ('1', 'true', 'yes', 'y'):
+        return 'multi'
+    if s in ('0', 'false', 'no', 'n'):
+        return 'single'
+    if ('multi' in s and 'az' in s) or s == 'multi':
+        return 'multi'
+    if ('single' in s and 'az' in s) or s == 'single':
+        return 'single'
+    if re.fullmatch(r'[a-z]{2}-[a-z]+-\d[a-z]', s):
+        return 'single'
+    if ',' in s:
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        if len(parts) >= 2:
+            return 'multi'
+    return None
+
+
+def _rds_row_engine_and_az(
+    work: pd.DataFrame,
+    row_i: int,
+    cols: list,
+    ins_idx: int,
+    cc_idx: int | None,
+) -> tuple[str | None, Literal['single', 'multi'] | None, bool, bool]:
+    """
+    Detect explicit RDS engine and AZ/deployment hints from row cells.
+    Returns (engine_token, az_mode, engine_explicit, az_explicit).
+    """
+    eng: str | None = None
+    az: Literal['single', 'multi'] | None = None
+    eng_explicit = False
+    az_explicit = False
+    for j, c in enumerate(cols):
+        if j == ins_idx:
+            continue
+        if cc_idx is not None and j == cc_idx:
+            continue
+        v = work.iat[row_i, j]
+        if not _nonempty_cell(v):
+            continue
+        h = str(c).strip().lower()
+        if (not eng_explicit) and any((hint in h for hint in _RDS_ENGINE_HEADER_HINTS)):
+            e = _normalize_rds_engine_token(v)
+            if e is not None:
+                eng = e
+                eng_explicit = True
+        if (not az_explicit) and any((hint in h for hint in _RDS_AZ_HEADER_HINTS)):
+            a = _classify_rds_az_mode(v)
+            if a is not None:
+                az = a
+                az_explicit = True
+        if eng_explicit and az_explicit:
+            break
+    return (eng, az, eng_explicit, az_explicit)
+
+
+def _is_rds_context_supported(
+    work: pd.DataFrame,
+    row_i: int,
+    cols: list,
+    ins_idx: int,
+    cc_idx: int | None,
+) -> bool:
+    """
+    RDS recommendations/pricing in this tool are scoped to MySQL-like Single-AZ class rates.
+    If explicit row context says otherwise (e.g., postgres / multi-az), suppress RDS enrichment.
+    """
+    (eng, az, eng_explicit, az_explicit) = _rds_row_engine_and_az(work, row_i, cols, ins_idx, cc_idx)
+    if eng_explicit and eng != 'mysql':
+        return False
+    if az_explicit and az != 'single':
+        return False
+    return True
 
 
 def _row_matches_service(inst: str, service: ServiceMode) -> bool:
@@ -479,6 +600,11 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 a1s[i] = a2s[i] = NA
                 continue
             backend = _pricing_backend(inst)
+            if backend == 'rds' and not _is_rds_context_supported(work, i, cols, ins_idx, cc_idx):
+                cur_p[i] = a1p[i] = a2p[i] = None
+                a1i[i] = a2i[i] = NA
+                a1s[i] = a2s[i] = NA
+                continue
             rec = get_rds_recommendations(inst, cpu_filter=cpu) if backend == 'rds' else get_recommendations(inst, cpu_filter=cpu)
             alt1 = rec.get('alt1')
             alt2 = rec.get('alt2')
