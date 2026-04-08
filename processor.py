@@ -203,6 +203,21 @@ def _column_name_looks_monthly(column_name: str | None) -> bool:
         cn,
     ):
         return True
+    # Also accept compact month-year forms joined by underscore/hyphen (e.g., mar_2026).
+    if re.search(
+        r'\b('
+        r'jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec'
+        r')[ _/\-]*20\d{2}\b',
+        cn,
+    ):
+        return True
+    if re.search(
+        r'\b20\d{2}[ _/\-]*('
+        r'jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec'
+        r')\b',
+        cn,
+    ):
+        return True
     return False
 
 def _to_float(v, *, column_name: str | None=None) -> float | None:
@@ -265,6 +280,8 @@ def _resolve_actual_cost_for_row(
     *,
     selected_cost_col: str | None,
     fallback_cost_cols: list[str] | None,
+    strict_month_only_when_present: bool=False,
+    month_candidate_cols: list[str] | None=None,
 ) -> float | None:
     """
     Per-row actual cost resolver:
@@ -279,7 +296,10 @@ def _resolve_actual_cost_for_row(
         if v is not None and v > 0:
             return v
         seen_cols.add(selected_cost_col)
+    selected_is_month_like = _column_name_looks_monthly(selected_cost_col) if selected_cost_col else False
+    has_month_candidates = bool(month_candidate_cols)
     if fallback_cost_cols:
+        month_cols_all: list[str] = [c for c in fallback_cost_cols if _column_name_looks_monthly(c)]
         month_cols: list[str] = []
         non_month_cols: list[str] = []
         for c in fallback_cost_cols:
@@ -294,6 +314,9 @@ def _resolve_actual_cost_for_row(
             v = _to_float(row.get(c), column_name=c)
             if v is not None and v > 0:
                 return v
+        # If any month-like columns exist in the dataset, do not fallback to non-month columns.
+        if strict_month_only_when_present and (month_cols_all or selected_is_month_like or has_month_candidates):
+            return None
         # Fallback: rightmost valid non-month column.
         for c in reversed(non_month_cols):
             v = _to_float(row.get(c), column_name=c)
@@ -380,6 +403,11 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             work.iloc[i],
             selected_cost_col=cc,
             fallback_cost_cols=fallback_cost_cols,
+            month_candidate_cols=fallback_cost_cols,
+            strict_month_only_when_present=bool(
+                (cc and _column_name_looks_monthly(cc))
+                or any((_column_name_looks_monthly(c) for c in (fallback_cost_cols or [])))
+            ),
         )
     inst_series = work.iloc[:, ins_idx]
     cur_p: list = [None] * n
