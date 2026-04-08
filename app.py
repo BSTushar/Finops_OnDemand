@@ -8,7 +8,13 @@ import pandas as pd
 import streamlit as st
 from data_loader import OS_COLUMN_NONE_OPTION, LoadResult, analyze_load, dataframe_from_bytes, finalize_binding, load_file
 from excel_export import build_excel, sanitize_formula_injection_dataframe, savings_numeric
-from instance_api import canonicalize_instance_api_name
+try:
+    from instance_api import canonicalize_instance_api_name
+except Exception:
+    # Defensive fallback: keep UI alive even if import resolution is broken
+    # in a stale local copy/environment.
+    def canonicalize_instance_api_name(value: object) -> str | None:  # type: ignore[no-redef]
+        return None
 from processor import apply_na_fill, process
 from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, DEFAULT_REGION, PRICING_SOURCE_LABEL, RDS_PRICING_NOTE, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale, cost_disclaimer_text
 from sheet_merger import merge_primary_with_secondary, suggest_key_pairs
