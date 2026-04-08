@@ -63,6 +63,22 @@ _RDS_AZ_HEADER_HINTS: tuple[str, ...] = (
     'deployment',
     'az',
 )
+_REGION_ALIASES: dict[str, str] = {
+    # Business aliases / shorthand seen in spreadsheets.
+    'ca central 1': 'ca-central-1',
+    'ca-central-1': 'ca-central-1',
+    'ca central': 'ca-central-1',
+    'eu west 1': 'eu-west-1',
+    'eu-west-1': 'eu-west-1',
+    'eu west 3': 'eu-west-3',
+    'eu-west-3': 'eu-west-3',
+}
+_REGION_FALLBACK_MAP: dict[str, str] = {
+    # Use closest supported regional bundle when local table for requested region is unavailable.
+    # (keeps deterministic behavior and avoids random fallbacks)
+    'ca-central-1': 'us-east-1',
+    'eu-west-3': 'eu-west-1',
+}
 _REGION_RE = re.compile(r'\b[a-z]{2}-[a-z]+-\d\b')
 _REGION_HEADER_HINTS: tuple[str, ...] = (
     'region',
@@ -168,6 +184,11 @@ def _normalize_region_token(v: object) -> str | None:
     s = str(v).strip().lower()
     if not s or s in ('nan', 'none', 'n/a'):
         return None
+    if s in _REGION_ALIASES:
+        return _REGION_ALIASES[s]
+    s_sp = re.sub(r'[_\s]+', ' ', s).strip()
+    if s_sp in _REGION_ALIASES:
+        return _REGION_ALIASES[s_sp]
     m = _REGION_RE.search(s)
     if not m:
         return None
@@ -220,6 +241,13 @@ def _region_for_row(
     if detected is None:
         return PRICING_LOOKUP_REGION
     return detected
+
+
+def _effective_region_for_pricing(region_token: str) -> str:
+    r = (region_token or '').strip().lower()
+    if not r:
+        return PRICING_LOOKUP_REGION
+    return _REGION_FALLBACK_MAP.get(r, r)
 
 
 def _rds_row_engine_and_az(
