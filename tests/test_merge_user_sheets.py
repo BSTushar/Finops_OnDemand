@@ -42,7 +42,8 @@ class TestUserSheet1Sheet2Merge(unittest.TestCase):
         self.assertIn('Alt1 Instance', out.columns)
         row304 = out[out['RecordID'].astype(str) == '304'].iloc[0]
         self.assertEqual(row304['VM_Size'], 'db.c5.2xlarge')
-        self.assertEqual(row304['Alt1 Instance'], 'db.c6i.2xlarge')
+        # Strict consistency: if local RDS alt hourly SKU is unavailable, alt instance is suppressed.
+        self.assertEqual(row304['Alt1 Instance'], 'N/A')
         self.assertEqual(row304['Alt1 Savings %'], 'N/A')
 
 

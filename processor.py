@@ -465,8 +465,24 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             if alt1 and alt2 and (alt1 == alt2):
                 alt2 = None
             p_cur = _hourly_cur(inst, os_engine, backend)
-            p_a1 = _hourly_alt(alt1, os_engine, backend)
-            p_a2 = _hourly_alt(alt2, os_engine, backend)
+            # For RDS we only show alternatives that have local table pricing; otherwise suppress
+            # to avoid "alt shown but prices/savings are N/A" confusion.
+            if backend == 'rds' and p_cur is None:
+                alt1 = None
+                alt2 = None
+                p_a1 = None
+                p_a2 = None
+            else:
+                p_a1 = _hourly_alt(alt1, os_engine, backend)
+                p_a2 = _hourly_alt(alt2, os_engine, backend)
+                if backend == 'rds':
+                    if alt1 is not None and p_a1 is None:
+                        alt1 = None
+                    if alt2 is not None and p_a2 is None:
+                        alt2 = None
+                    # Recompute prices after suppression.
+                    p_a1 = _hourly_alt(alt1, os_engine, backend)
+                    p_a2 = _hourly_alt(alt2, os_engine, backend)
             cur_p[i] = p_cur
             a1i[i] = alt1 if alt1 is not None else NA
             if alt2 is not None:

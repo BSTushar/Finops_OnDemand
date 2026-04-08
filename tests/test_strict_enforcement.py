@@ -90,9 +90,8 @@ class TestProcessorStrict(unittest.TestCase):
         b = ColumnBinding(instance='API Name', os='OS', actual_cost='Spend')
         out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
         self.assertIn('Alt1 Instance', out.columns)
-        alt1 = out['Alt1 Instance'].iloc[0]
-        self.assertIsNotNone(alt1)
-        self.assertNotEqual(alt1, 'N/A')
+        # Consistency rule: if current RDS SKU has no local hourly price, alternatives must be suppressed.
+        self.assertEqual(out['Alt1 Instance'].iloc[0], 'N/A')
         self.assertEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
         self.assertEqual(out['Discount %'].iloc[0], 'N/A')
         self.assertEqual(out['Alt1 Price ($/hr)'].iloc[0], 'N/A')
