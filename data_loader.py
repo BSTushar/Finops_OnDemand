@@ -63,32 +63,6 @@ COST_HINTS: frozenset[str] = frozenset({
     'price', 'pricing', 'fee', 'fees', 'usd', 'payment', 'net amount', 'gross', 'pre tax', 'pretax',
     'cur', 'currency', 'total usd', 'amount usd', 'usage amount', 'resource cost',
 })
-_MONTH_NAME_TO_NUM: dict[str, int] = {
-    'jan': 1,
-    'january': 1,
-    'feb': 2,
-    'february': 2,
-    'mar': 3,
-    'march': 3,
-    'apr': 4,
-    'april': 4,
-    'may': 5,
-    'jun': 6,
-    'june': 6,
-    'jul': 7,
-    'july': 7,
-    'aug': 8,
-    'august': 8,
-    'sep': 9,
-    'sept': 9,
-    'september': 9,
-    'oct': 10,
-    'october': 10,
-    'nov': 11,
-    'november': 11,
-    'dec': 12,
-    'december': 12,
-}
 
 def _header_matches(h: str, hints: frozenset[str]) -> bool:
     n = _norm_header(h)
@@ -113,148 +87,6 @@ def _instance_header_keyword_hit(h: str) -> bool:
         if token in INSTANCE_HEADER_KEYWORDS:
             return True
     return False
-
-
-def _latest_month_from_header(h: object) -> tuple[int, int] | None:
-    """
-    Parse month-bearing header variants (YYYY-MM, MM-YYYY, Mon YYYY, etc.).
-    Returns (year, month) if present.
-    """
-    s = _norm_header(str(h))
-    if not s:
-        return None
-    m = re.search(r'\b(20\d{2})[ _/\-](0?[1-9]|1[0-2])\b', s)
-    if m:
-        return (int(m.group(1)), int(m.group(2)))
-    m = re.search(r'\b(0?[1-9]|1[0-2])[ _/\-](20\d{2})\b', s)
-    if m:
-        return (int(m.group(2)), int(m.group(1)))
-    m = re.search(
-        r'\b('
-        r'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|'
-        r'jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|'
-        r'oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
-        r')\b[ _/\-]*(20\d{2})\b',
-        s,
-    )
-    if m:
-        month_key = m.group(1)
-        month_num = _MONTH_NAME_TO_NUM.get(month_key)
-        if month_num is not None:
-            return (int(m.group(2)), month_num)
-    m = re.search(
-        r'\b(20\d{2})[ _/\-]*('
-        r'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|'
-        r'jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|'
-        r'oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
-        r')\b',
-        s,
-    )
-    if m:
-        month_key = m.group(2)
-        month_num = _MONTH_NAME_TO_NUM.get(month_key)
-        if month_num is not None:
-            return (int(m.group(1)), month_num)
-    m = re.search(
-        r'\b('
-        r'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|'
-        r'jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|'
-        r'oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
-        r')\b',
-        s,
-    )
-    if m:
-        month_key = m.group(1)
-        month_num = _MONTH_NAME_TO_NUM.get(month_key)
-        if month_num is not None:
-            # Month-only headers are ranked within a synthetic year bucket.
-            return (0, month_num)
-    return None
-
-
-def _header_looks_like_sheet_price(h: object) -> bool:
-    n = _norm_header(str(h)).replace(' ', '')
-    if not n:
-        return False
-    priceish = ('price' in n) or ('pricing' in n) or ('rate' in n) or ('unitprice' in n)
-    costish = any((k in n for k in ('cost', 'spend', 'amount', 'charge', 'billing')))
-    return bool(priceish and (not costish))
-
-
-def _header_looks_like_actual_cost(h: object) -> bool:
-    n = _norm_header(str(h)).replace(' ', '')
-    if not n:
-        return False
-    if any((k in n for k in ('ri', 'reserved', 'on demand', 'ondemand', 'total', 'spend', 'billing', 'cost'))):
-        return True
-    return False
-
-
-def _is_empty_like(v: object) -> bool:
-    if v is None:
-        return True
-    try:
-        if pd.isna(v):
-            return True
-    except (TypeError, ValueError):
-        pass
-    if isinstance(v, str) and (not v.strip() or v.strip().lower() in ('nan', 'none', 'n/a')):
-        return True
-    return False
-
-
-def _cost_columns_priority(df: pd.DataFrame, candidates: list[str]) -> list[str]:
-    """
-    Priority for row-wise actual-cost extraction:
-    1) monthly headers by newest month first
-    2) all other cost-like columns, rightmost first
-    """
-    if not candidates:
-        return []
-    month_cols = [c for c in candidates if _latest_month_from_header(c) is not None]
-    month_cols_sorted = sorted(
-        month_cols,
-        key=lambda c: (_latest_month_from_header(c) or (0, 0)),
-        reverse=True,
-    )
-    others = [c for c in candidates if c not in month_cols_sorted]
-    if not others:
-        return month_cols_sorted
-    idx = {c: i for i, c in enumerate(df.columns)}
-    strong = [c for c in others if _header_looks_like_actual_cost(c)]
-    weak = [c for c in others if c not in strong]
-    strong_sorted = sorted(strong, key=lambda c: idx.get(c, -1), reverse=True)
-    weak_sorted = sorted(weak, key=lambda c: idx.get(c, -1), reverse=True)
-    return month_cols_sorted + strong_sorted + weak_sorted
-
-
-def cost_candidate_columns(df: pd.DataFrame, skip_cols: set[str] | None=None) -> list[str]:
-    """
-    Public helper for processor: dynamic cost-column candidates ordered for row-wise extraction.
-    """
-    (cost_c, _cost_inferred_values) = find_cost_columns_combined(df, skip_cols or set())
-    cost_c = _rank_cost_columns(cost_c)
-    return _cost_columns_priority(df, cost_c)
-
-
-def select_actual_cost_cell_for_row(
-    df: pd.DataFrame,
-    row_i: int,
-    ordered_cost_cols: list[str],
-) -> tuple[object | None, str | None]:
-    """
-    Per-row latest non-null cost:
-    - monthly candidates first (newest month first)
-    - fallback to rightmost valid non-month candidate
-    """
-    for c in ordered_cost_cols:
-        if c not in df.columns:
-            continue
-        v = df.iat[row_i, df.columns.get_loc(c)]
-        if _is_empty_like(v):
-            continue
-        return (v, c)
-    return (None, None)
 def _cell_looks_like_instance_type(cell: object) -> bool:
     if cell is None:
         return False
@@ -309,46 +141,21 @@ def _score_os_columns(df: pd.DataFrame) -> list[tuple[str, float]]:
 
 
 def _rank_cost_columns(candidates: list[str]) -> list[str]:
-    """Prefer latest monthly cost, then total/primary cost, and de-prioritize sheet price/rate columns."""
+    """Prefer total / primary cost columns when multiple are detected (e.g. Total_Cost_USD over Backup_Cost)."""
     if len(candidates) <= 1:
         return list(candidates)
 
-    def semantic_bucket(raw: str, norm_no_space: str) -> int:
-        # Lower is better.
-        if any((k in norm_no_space for k in ('actualcost', 'totalcost', 'billingamount', 'netcost', 'grosscost'))):
-            return 0
-        if any((k in norm_no_space for k in ('amortizedcost', 'effectivecost', 'finalcost'))):
-            return 1
-        if any((k in norm_no_space for k in ('blendedcost', 'unblendedcost'))):
-            return 2
-        if any((k in norm_no_space for k in ('ondemandcost', 'ondemandspend', 'ondemandamount'))):
-            return 3
-        if any((k in norm_no_space for k in ('savingsplancost', 'spcost', 'spendunder'))):
-            return 4
-        if any((k in norm_no_space for k in ('ricost', 'reservedinstancecost', 'reservationcost'))):
-            return 5
-        if any((k in norm_no_space for k in ('cost', 'spend', 'amount', 'billing', 'charge'))):
-            return 6
-        if _header_looks_like_sheet_price(raw):
-            return 9
-        return 7
-
     def rank_key(name: object) -> tuple[int, str]:
-        raw = str(name)
-        n = _norm_header(raw).replace(' ', '')
-        ym = _latest_month_from_header(raw)
-        if ym is not None:
-            # Newest month first.
-            return (0, f'{-(ym[0] * 100 + ym[1]):08d}:{raw}')
+        n = _norm_header(str(name)).replace(' ', '')
         if n == 'totalcostusd' or n == 'total_cost_usd':
-            return (1, raw)
+            return (0, str(name))
         if 'total' in n and 'cost' in n and 'usd' in n:
-            return (2, raw)
+            return (1, str(name))
         if 'total' in n and 'cost' in n:
-            return (3, raw)
+            return (2, str(name))
         if n.startswith('total'):
-            return (4, raw)
-        return (5 + semantic_bucket(raw, n), raw)
+            return (3, str(name))
+        return (4, str(name))
 
     return sorted(candidates, key=rank_key)
 
@@ -541,14 +348,9 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
         skip_for_cost.add(os_col)
     (cost_c, cost_inferred_values) = find_cost_columns_combined(df, skip_for_cost)
     cost_c = _rank_cost_columns(cost_c)
-    ordered_cost = _cost_columns_priority(df, cost_c)
-    monthly_cost_cols = [c for c in ordered_cost if _latest_month_from_header(c) is not None]
-    selected_cost: str | None = None
-    if monthly_cost_cols:
-        selected_cost = monthly_cost_cols[0]
-    elif len(ordered_cost) == 1:
-        selected_cost = ordered_cost[0]
-    needs_cost_pick = len(ordered_cost) > 1 and selected_cost is None
+    # Auto-pick best cost candidate even when multiple are detected.
+    selected_cost: str | None = cost_c[0] if len(cost_c) >= 1 else None
+    needs_cost_pick = False
     needs_i = inst_amb or inst_col is None
     needs_o = os_amb
     inst_c_list = list(dict.fromkeys(inst_ui if needs_i else ([inst_col] if inst_col is not None else [])))
@@ -559,21 +361,18 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
         warnings.append('Multiple columns match OS-like values — pick the one that represents OS / engine.')
     if (not needs_o) and os_col is None and (not needs_i):
         warnings.append('No OS-like column detected from cell values — pricing uses Linux for all rows (see Pricing OS column).')
-    if len(ordered_cost) == 0:
+    if len(cost_c) == 0:
         warnings.append('No cost/spend/amount column auto-detected — savings will be N/A without selection.')
-    elif len(ordered_cost) > 1 and selected_cost is None:
-        warnings.append(f'Multiple cost-like columns found ({len(ordered_cost)}) — please choose Actual Cost column.')
-    elif len(ordered_cost) > 1 and selected_cost is not None:
+    elif len(cost_c) > 1:
         warnings.append(
-            f"Multiple cost-like columns found ({len(ordered_cost)}) — auto-selected '{selected_cost}'"
-            ' (latest monthly column).'
+            f"Multiple cost-like columns found ({len(cost_c)}) — auto-selected '{selected_cost}'."
         )
     elif cost_inferred_values:
         warnings.append('Cost column inferred from numeric values — confirm it is the spend you want for savings %.')
     binding: ColumnBinding | None = None
     if not needs_i and (not needs_o) and inst_col is not None:
         binding = ColumnBinding(instance=inst_col, os=os_col, actual_cost=selected_cost)
-    return LoadResult(df=df, warnings=warnings, instance_candidates=inst_c_list, os_candidates=os_c_list, cost_candidates=ordered_cost, binding=binding, needs_instance_pick=needs_i, needs_os_pick=needs_o, needs_cost_pick=needs_cost_pick and len(ordered_cost) > 1)
+    return LoadResult(df=df, warnings=warnings, instance_candidates=inst_c_list, os_candidates=os_c_list, cost_candidates=cost_c, binding=binding, needs_instance_pick=needs_i, needs_os_pick=needs_o, needs_cost_pick=needs_cost_pick and len(cost_c) > 1)
 
 def _normalize_loaded_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Blank strings → NA without deprecated replace downcasting; keeps non-object dtypes."""

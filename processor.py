@@ -10,7 +10,7 @@ from pandas.testing import assert_frame_equal, assert_series_equal
 from data_loader import ColumnBinding, require_unique_column_names
 from instance_api import canonicalize_instance_api_name
 from os_resolve import cell_matches_valid_os_pattern, classify_os_kind
-from pricing_engine import DEFAULT_REGION, PRICING_LOOKUP_REGION, get_price, get_rds_hourly
+from pricing_engine import DEFAULT_REGION, SUPPORTED_REGIONS, get_price, get_rds_hourly
 from pricing_normalize import LINUX_FALLBACK_LABEL, normalize_instance_string, normalize_os_engine_key, normalize_pricing_os_label
 from recommender import CPUFilterMode, get_recommendations, is_graviton_family
 from rds_recommender import get_rds_recommendations
@@ -45,46 +45,6 @@ NA_FILL_COLS: tuple[str, ...] = (
     'Alt2 Instance',
     'Alt2 Price ($/hr)',
     'Alt2 Savings %',
-)
-
-_RDS_ENGINE_HEADER_HINTS: tuple[str, ...] = (
-    'db engine',
-    'database engine',
-    'engine',
-)
-_RDS_AZ_HEADER_HINTS: tuple[str, ...] = (
-    'availability zone',
-    'availability_zone',
-    'avail zone',
-    'avail_zone',
-    'multi-az',
-    'multi az',
-    'multi_az',
-    'deployment',
-    'az',
-)
-_REGION_ALIASES: dict[str, str] = {
-    # Business aliases / shorthand seen in spreadsheets.
-    'ca central 1': 'ca-central-1',
-    'ca-central-1': 'ca-central-1',
-    'ca central': 'ca-central-1',
-    'eu west 1': 'eu-west-1',
-    'eu-west-1': 'eu-west-1',
-    'eu west 3': 'eu-west-3',
-    'eu-west-3': 'eu-west-3',
-}
-_REGION_FALLBACK_MAP: dict[str, str] = {
-    # Use closest supported regional bundle when local table for requested region is unavailable.
-    # (keeps deterministic behavior and avoids random fallbacks)
-    'ca-central-1': 'us-east-1',
-    'eu-west-3': 'eu-west-1',
-}
-_REGION_RE = re.compile(r'\b[a-z]{2}-[a-z]+-\d\b')
-_REGION_HEADER_HINTS: tuple[str, ...] = (
-    'region',
-    'aws region',
-    'location',
-    'region id',
 )
 
 def _first_col_index(cols: list, name: str) -> int:
@@ -132,197 +92,6 @@ def _raw_os_cell_for_row(
     return None
 
 
-def _normalize_rds_engine_token(v: object) -> str | None:
-    if v is None:
-        return None
-    s = str(v).strip().lower()
-    if not s or s in ('nan', 'none', 'n/a'):
-        return None
-    if 'mysql' in s:
-        return 'mysql'
-    if 'mariadb' in s:
-        return 'mariadb'
-    if 'postgres' in s:
-        return 'postgres'
-    if 'oracle' in s:
-        return 'oracle'
-    if 'sql server' in s or 'sqlserver' in s or 'mssql' in s:
-        return 'sqlserver'
-    if 'aurora' in s:
-        return 'aurora'
-    return None
-
-
-def _classify_rds_az_mode(v: object) -> Literal['single', 'multi'] | None:
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return 'multi' if v else 'single'
-    s = str(v).strip().lower()
-    if not s or s in ('nan', 'none', 'n/a'):
-        return None
-    if s in ('1', 'true', 'yes', 'y'):
-        return 'multi'
-    if s in ('0', 'false', 'no', 'n'):
-        return 'single'
-    if ('multi' in s and 'az' in s) or s == 'multi':
-        return 'multi'
-    if ('single' in s and 'az' in s) or s == 'single':
-        return 'single'
-    if re.fullmatch(r'[a-z]{2}-[a-z]+-\d[a-z]', s):
-        return 'single'
-    if ',' in s:
-        parts = [p.strip() for p in s.split(',') if p.strip()]
-        if len(parts) >= 2:
-            return 'multi'
-    return None
-
-
-def _normalize_region_token(v: object) -> str | None:
-    if v is None:
-        return None
-    s = str(v).strip().lower()
-    if not s or s in ('nan', 'none', 'n/a'):
-        return None
-    if s in _REGION_ALIASES:
-        return _REGION_ALIASES[s]
-    s_sp = re.sub(r'[_\s]+', ' ', s).strip()
-    if s_sp in _REGION_ALIASES:
-        return _REGION_ALIASES[s_sp]
-    m = _REGION_RE.search(s)
-    if not m:
-        return None
-    return m.group(0)
-
-
-def _region_for_row(
-    work: pd.DataFrame,
-    row_i: int,
-    cols: list,
-    ins_idx: int,
-    cc_idx: int | None,
-) -> str:
-    """
-    Per-row pricing region:
-    - detect explicit region-id values from region-like headers/cells
-    - fallback to PRICING_LOOKUP_REGION when not detected/supported
-    """
-    detected: str | None = None
-    # Prefer region-like headers first.
-    for j, c in enumerate(cols):
-        if j == ins_idx:
-            continue
-        if cc_idx is not None and j == cc_idx:
-            continue
-        h = str(c).strip().lower()
-        if not any((hint in h for hint in _REGION_HEADER_HINTS)):
-            continue
-        v = work.iat[row_i, j]
-        if not _nonempty_cell(v):
-            continue
-        r = _normalize_region_token(v)
-        if r:
-            detected = r
-            break
-    # Fallback scan: any explicit region token in row.
-    if detected is None:
-        for j in range(len(cols)):
-            if j == ins_idx:
-                continue
-            if cc_idx is not None and j == cc_idx:
-                continue
-            v = work.iat[row_i, j]
-            if not _nonempty_cell(v):
-                continue
-            r = _normalize_region_token(v)
-            if r:
-                detected = r
-                break
-    if detected is None:
-        return PRICING_LOOKUP_REGION
-    return detected
-
-
-def _effective_region_for_pricing(region_token: str) -> str:
-    r = (region_token or '').strip().lower()
-    if not r:
-        return PRICING_LOOKUP_REGION
-    return _REGION_FALLBACK_MAP.get(r, r)
-
-
-def _rds_row_engine_and_az(
-    work: pd.DataFrame,
-    row_i: int,
-    cols: list,
-    ins_idx: int,
-    cc_idx: int | None,
-) -> tuple[str | None, Literal['single', 'multi'] | None, bool, bool]:
-    """
-    Detect explicit RDS engine and AZ/deployment hints from row cells.
-    Returns (engine_token, az_mode, engine_explicit, az_explicit).
-    """
-    eng: str | None = None
-    az: Literal['single', 'multi'] | None = None
-    eng_explicit = False
-    az_explicit = False
-    for j, c in enumerate(cols):
-        if j == ins_idx:
-            continue
-        if cc_idx is not None and j == cc_idx:
-            continue
-        v = work.iat[row_i, j]
-        if not _nonempty_cell(v):
-            continue
-        h = str(c).strip().lower()
-        if (not eng_explicit) and any((hint in h for hint in _RDS_ENGINE_HEADER_HINTS)):
-            e = _normalize_rds_engine_token(v)
-            if e is not None:
-                eng = e
-                eng_explicit = True
-        if (not az_explicit) and any((hint in h for hint in _RDS_AZ_HEADER_HINTS)):
-            a = _classify_rds_az_mode(v)
-            if a is not None:
-                az = a
-                az_explicit = True
-        if eng_explicit and az_explicit:
-            break
-    return (eng, az, eng_explicit, az_explicit)
-
-
-def _is_rds_context_supported(
-    work: pd.DataFrame,
-    row_i: int,
-    cols: list,
-    ins_idx: int,
-    cc_idx: int | None,
-) -> bool:
-    """
-    RDS recommendations/pricing in this tool are scoped to MySQL-like Single-AZ class rates.
-    If explicit row context says otherwise (e.g., postgres / multi-az), suppress RDS enrichment.
-    """
-    (eng, az, eng_explicit, az_explicit) = _rds_row_engine_and_az(work, row_i, cols, ins_idx, cc_idx)
-    if eng_explicit and eng != 'mysql':
-        return False
-    if az_explicit and az != 'single':
-        return False
-    # If engine is provided in the mapped OS/engine column and is explicitly non-mysql,
-    # suppress RDS recommendation/pricing to avoid misleading output.
-    if not eng_explicit:
-        for j in range(len(cols)):
-            if j == ins_idx:
-                continue
-            if cc_idx is not None and j == cc_idx:
-                continue
-            h = str(cols[j]).strip().lower()
-            if h in ('product', 'os', 'engine', 'db engine', 'database engine'):
-                e = _normalize_rds_engine_token(work.iat[row_i, j])
-                if e is not None and e != 'mysql':
-                    return False
-                if e is not None:
-                    break
-    return True
-
-
 def _row_matches_service(inst: str, service: ServiceMode) -> bool:
     s = normalize_instance_string(inst)
     if not s or s in ('nan', 'none'):
@@ -341,7 +110,7 @@ def _pricing_backend(inst: str) -> Literal['ec2', 'rds']:
     return 'rds' if normalize_instance_string(inst).startswith('db.') else 'ec2'
 
 def _hourly_cur(inst: str, os_engine: str, backend: Literal['ec2', 'rds'], *, region: str) -> float | None:
-    """Use detected per-row region for on-demand hourly SKUs when supported."""
+    """Use row-resolved region for on-demand hourly SKUs."""
     inst_key = normalize_instance_string(inst)
     if not inst_key:
         return None
@@ -358,6 +127,54 @@ def _hourly_alt(alt: str | None, os_engine: str, backend: Literal['ec2', 'rds'],
     if a in (NA, ALT2_NO_DISTINCT, ALT2_INCOMPATIBLE_OS) or not a or a.lower() in ('nan', 'none'):
         return None
     return _hourly_cur(normalize_instance_string(alt), os_engine, backend, region=region)
+
+
+_SUPPORTED_REGION_IDS: frozenset[str] = frozenset((rid for rid, _label in SUPPORTED_REGIONS))
+_ROW_REGION_ALIASES: dict[str, str] = {
+    # Local bundled tables do not have direct entries for these in this build.
+    'eu-west-3': 'eu-west-1',
+    'ca-central-1': 'us-east-1',
+}
+_REGION_ID_RE = re.compile(r'\b([a-z]{2}-[a-z-]+-\d)\b', re.IGNORECASE)
+
+
+def _region_for_pricing(raw_region: object, *, default_region: str) -> str:
+    s = normalize_instance_string(raw_region).replace('_', '-')
+    m = _REGION_ID_RE.search(s)
+    rid = (m.group(1) if m else s).strip().lower()
+    if rid in _ROW_REGION_ALIASES:
+        return _ROW_REGION_ALIASES[rid]
+    if rid in _SUPPORTED_REGION_IDS:
+        return rid
+    d = normalize_instance_string(default_region).replace('_', '-').strip().lower()
+    return d if d in _SUPPORTED_REGION_IDS else DEFAULT_REGION
+
+
+def _row_region_value(
+    work: pd.DataFrame,
+    row_i: int,
+    cols: list,
+    ins_idx: int,
+    cc_idx: int | None,
+) -> object | None:
+    """
+    Detect row region from any region-like column first, then from any cell token.
+    """
+    for j, c in enumerate(cols):
+        if j == ins_idx or (cc_idx is not None and j == cc_idx):
+            continue
+        if 'region' not in _norm_header(c):
+            continue
+        v = work.iat[row_i, j]
+        if _nonempty_cell(v):
+            return v
+    for j, _c in enumerate(cols):
+        if j == ins_idx or (cc_idx is not None and j == cc_idx):
+            continue
+        v = work.iat[row_i, j]
+        if _nonempty_cell(v) and _REGION_ID_RE.search(str(v)):
+            return v
+    return None
 
 
 def _family_token_from_instance(api_name: str) -> str:
@@ -413,59 +230,7 @@ def _discount_pct_vs_list(act: object, list_hourly: object) -> float | str:
     except (ArithmeticError, ZeroDivisionError, TypeError, ValueError):
         return NA
 
-def _column_name_looks_monthly(column_name: str | None) -> bool:
-    if column_name is None:
-        return False
-    cn = str(column_name).strip().lower()
-    if not cn:
-        return False
-    if ('month' in cn) or ('monthly' in cn):
-        return True
-    if re.search(r'\b(20\d{2})[ _/\-](0?[1-9]|1[0-2])\b', cn):
-        return True
-    if re.search(r'\b(0?[1-9]|1[0-2])[ _/\-](20\d{2})\b', cn):
-        return True
-    if re.search(
-        r'\b('
-        r'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|'
-        r'jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|'
-        r'oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
-        r')\b',
-        cn,
-    ):
-        return True
-    # Also accept compact month-year forms joined by underscore/hyphen (e.g., mar_2026).
-    if re.search(
-        r'\b('
-        r'jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec'
-        r')[ _/\-]*20\d{2}\b',
-        cn,
-    ):
-        return True
-    if re.search(
-        r'\b20\d{2}[ _/\-]*('
-        r'jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec'
-        r')\b',
-        cn,
-    ):
-        return True
-    return False
-
-
-def _column_name_looks_sheet_price(column_name: str | None) -> bool:
-    if column_name is None:
-        return False
-    cn = str(column_name).strip().lower().replace(' ', '')
-    if not cn:
-        return False
-    priceish = ('price' in cn) or ('pricing' in cn) or ('rate' in cn) or ('unitprice' in cn)
-    costish = any((k in cn for k in ('cost', 'spend', 'amount', 'charge', 'billing')))
-    return bool(priceish and (not costish))
-
-def _to_float(v, *, column_name: str | None=None) -> float | None:
-    col_monthly = False
-    if column_name is not None:
-        col_monthly = _column_name_looks_monthly(column_name)
+def _to_float(v) -> float | None:
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return None
     if isinstance(v, Decimal):
@@ -485,11 +250,6 @@ def _to_float(v, *, column_name: str | None=None) -> float | None:
         s = v.strip()
         if not s or s.lower() in ('nan', 'n/a', '-', ''):
             return None
-        s_low = s.lower()
-        val_monthly = ('/month' in s_low) or ('per month' in s_low) or ('monthly' in s_low)
-        s = re.sub(r'(?i)\s*/\s*month\b', '', s)
-        s = re.sub(r'(?i)\bper\s+month\b', '', s)
-        s = re.sub(r'(?i)\bmonthly\b', '', s)
         s = re.sub(r'^[\$€£]\s*', '', s)
         s = s.replace(',', '')
         s = s.strip()
@@ -501,84 +261,103 @@ def _to_float(v, *, column_name: str | None=None) -> float | None:
             return None
         if pd.isna(x) or not math.isfinite(x):
             return None
-        out = x
-        if col_monthly or val_monthly:
-            out = out / 730.0
-        return out
+        return x
     try:
         x = float(v)
         if pd.isna(x) or not math.isfinite(x):
             return None
-        out = x
-        if col_monthly:
-            out = out / 730.0
-        return out
+        return x
     except (TypeError, ValueError):
         return None
+
+
+def _norm_header(name: object) -> str:
+    s = str(name).strip().lower()
+    s = re.sub(r'[_\-]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+
+_MONTH_HDR_RE = re.compile(
+    r'\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b|\b20\d{2}[-_/ ]?(?:0?[1-9]|1[0-2])\b',
+    re.IGNORECASE,
+)
+
+
+def _cost_header_kind(name: object) -> str:
+    """
+    Lightweight cost-header classifier for row-wise actual cost fallback.
+    Kinds: month, ri, on_demand, total, other.
+    """
+    n = _norm_header(name)
+    if _MONTH_HDR_RE.search(n):
+        return 'month'
+    if 'on demand' in n or 'ondemand' in n:
+        return 'on_demand'
+    if re.search(r'\bri\b', n) or 'reserved instance' in n or 'reservation' in n:
+        return 'ri'
+    if 'total cost' in n or n.startswith('total '):
+        return 'total'
+    return 'other'
 
 
 def _resolve_actual_cost_for_row(
     row: pd.Series,
     *,
     selected_cost_col: str | None,
-    fallback_cost_cols: list[str] | None,
-    strict_month_only_when_present: bool=False,
-    month_candidate_cols: list[str] | None=None,
-    prefer_alternative_non_month_when_selected_is_price_like: bool=False,
+    fallback_cost_cols: list[str],
 ) -> float | None:
     """
-    Per-row actual cost resolver:
-    1) selected column first (e.g. latest monthly chosen in loader)
-    2) then fallback cost columns:
-       - month-like columns first (latest-first rank from loader)
-       - then non-month columns, rightmost valid fallback
+    Resolve row-wise actual cost with non-zero preference and safe fallback.
+
+    Priority:
+    1) Selected cost column (if > 0)
+    2) Month-like columns
+    3) If selected RI is zero/missing -> prefer On Demand (and vice versa)
+    4) Remaining RI / On Demand / Total / other cost candidates
     """
-    seen_cols: set[str] = set()
-    selected_is_price_like = False
-    if selected_cost_col:
-        v = _to_float(row.get(selected_cost_col), column_name=selected_cost_col)
-        if v is not None and v > 0:
-            # If selected cost header appears to be sheet/list on-demand price and we have
-            # other non-month candidates, let fallback choose better actual-cost-like columns.
-            if not prefer_alternative_non_month_when_selected_is_price_like:
-                return v
-            cn = str(selected_cost_col).strip().lower()
-            priceish = ('price' in cn) or ('rate' in cn) or ('unitprice' in cn) or ('unit price' in cn)
-            costish = any((k in cn for k in ('cost', 'spend', 'amount', 'charge', 'billing', 'ri', 'reserved')))
-            # Treat as sheet-price-like only when it looks like a price/rate field without
-            # explicit cost semantics. Example: "List Price", "Rate Card Price".
-            selected_is_price_like = bool(priceish and (not costish))
-            if not selected_is_price_like:
-                return v
-        seen_cols.add(selected_cost_col)
-    selected_is_month_like = _column_name_looks_monthly(selected_cost_col) if selected_cost_col else False
-    has_month_candidates = bool(month_candidate_cols)
-    if fallback_cost_cols:
-        month_cols_all: list[str] = [c for c in fallback_cost_cols if _column_name_looks_monthly(c)]
-        month_cols: list[str] = []
-        non_month_cols: list[str] = []
-        for c in fallback_cost_cols:
-            if c in seen_cols:
-                continue
-            if _column_name_looks_monthly(c):
-                month_cols.append(c)
-            else:
-                non_month_cols.append(c)
-        # Prefer month-like columns in ranked order (latest-first from loader).
-        for c in month_cols:
-            v = _to_float(row.get(c), column_name=c)
-            if v is not None and v > 0:
-                return v
-        # If any month-like columns exist in the dataset, do not fallback to non-month columns.
-        if strict_month_only_when_present and (month_cols_all or selected_is_month_like or has_month_candidates):
+    seen: set[str] = set()
+    candidates: list[str] = []
+    if selected_cost_col is not None:
+        candidates.append(selected_cost_col)
+        seen.add(selected_cost_col)
+    for c in fallback_cost_cols:
+        if c in seen:
+            continue
+        candidates.append(c)
+        seen.add(c)
+
+    def _pos_value(col: str) -> float | None:
+        v = _to_float(row.get(col))
+        if v is None or not math.isfinite(v) or v <= 0:
             return None
-        # Fallback: rightmost valid non-month column.
-        for c in reversed(non_month_cols):
-            if selected_is_price_like and c == selected_cost_col:
-                continue
-            v = _to_float(row.get(c), column_name=c)
-            if v is not None and v > 0:
-                return v
+        return v
+
+    if selected_cost_col is not None:
+        sv = _pos_value(selected_cost_col)
+        if sv is not None:
+            return sv
+
+    month_cols = [c for c in candidates if _cost_header_kind(c) == 'month']
+    ri_cols = [c for c in candidates if _cost_header_kind(c) == 'ri']
+    od_cols = [c for c in candidates if _cost_header_kind(c) == 'on_demand']
+    total_cols = [c for c in candidates if _cost_header_kind(c) == 'total']
+    other_cols = [c for c in candidates if _cost_header_kind(c) == 'other']
+
+    selected_kind = _cost_header_kind(selected_cost_col) if selected_cost_col is not None else 'other'
+    if selected_kind == 'ri':
+        fallback_order = month_cols + od_cols + ri_cols + total_cols + other_cols
+    elif selected_kind == 'on_demand':
+        fallback_order = month_cols + ri_cols + od_cols + total_cols + other_cols
+    else:
+        fallback_order = month_cols + ri_cols + od_cols + total_cols + other_cols
+
+    for c in fallback_order:
+        if selected_cost_col is not None and c == selected_cost_col:
+            continue
+        v = _pos_value(c)
+        if v is not None:
+            return v
     return None
 
 def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION, service: ServiceMode='both', cpu_filter: CPUFilterMode='both') -> pd.DataFrame:
@@ -603,36 +382,17 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     cc = binding.actual_cost
     cc_idx: int | None = _first_col_index(cols, cc) if (cc and any(c == cc for c in cols)) else None
     os_idx = _first_col_index(cols, binding.os) if binding.os is not None else None
-    # Optional dynamic fallback list for per-row cost resolution without hardcoding names.
     fallback_cost_cols: list[str] = []
-    month_header_detector = None
     try:
-        from data_loader import (
-            find_cost_columns_combined as _find_cost_columns_combined,
-            _rank_cost_columns as _rank_cost_columns,
-            _latest_month_from_header as _latest_month_from_header,
-        )
-        month_header_detector = _latest_month_from_header
+        from data_loader import find_cost_columns_combined as _find_cost_columns_combined, _rank_cost_columns as _rank_cost_columns
+
         _skip: set[str] = {binding.instance}
         if binding.os is not None:
             _skip.add(binding.os)
         (det_cost_cols, _value_only) = _find_cost_columns_combined(work, _skip)
         fallback_cost_cols = _rank_cost_columns(det_cost_cols)
-        # If no explicit binding cost column is selected, prefer the latest month-like cost column.
-        if cc is None:
-            month_cols = [c for c in fallback_cost_cols if _latest_month_from_header(c) is not None]
-            if month_cols:
-                cc = month_cols[0]
-                cc_idx = _first_col_index(cols, cc) if any(cn == cc for cn in cols) else None
     except Exception:
         fallback_cost_cols = []
-        month_header_detector = None
-    # Prioritize month-derived fallback columns from newest -> oldest for row-wise selection.
-    if month_header_detector is not None and fallback_cost_cols:
-        month_cols = [c for c in fallback_cost_cols if month_header_detector(c) is not None]
-        month_cols.sort(key=lambda c: month_header_detector(c), reverse=True)
-        non_month_cols = [c for c in fallback_cost_cols if c not in month_cols]
-        fallback_cost_cols = month_cols + non_month_cols
     if _finops_debug:
         logger.info(
             'FinOps enrichment (debug): rows=%s region=%s service=%s',
@@ -654,19 +414,14 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
         _raise_if_original_data_changed(original_df, df, context='processing')
         return final_df
     n = len(work)
-    actual_vals: list[float | None] = [None] * n
-    for i in range(n):
-        actual_vals[i] = _resolve_actual_cost_for_row(
+    actual_vals: list[float | None] = [
+        _resolve_actual_cost_for_row(
             work.iloc[i],
             selected_cost_col=cc,
             fallback_cost_cols=fallback_cost_cols,
-            month_candidate_cols=fallback_cost_cols,
-            prefer_alternative_non_month_when_selected_is_price_like=True,
-            strict_month_only_when_present=bool(
-                (cc and _column_name_looks_monthly(cc))
-                or any((_column_name_looks_monthly(c) for c in (fallback_cost_cols or [])))
-            ),
         )
+        for i in range(n)
+    ]
     inst_series = work.iloc[:, ins_idx]
     cur_p: list = [None] * n
     a1i: list = [None] * n
@@ -679,9 +434,6 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     pricing_os_out: list[str] = [LINUX_FALLBACK_LABEL] * n
     cpu: CPUFilterMode = cpu_filter if cpu_filter in ('default', 'intel', 'graviton', 'both') else 'both'
     row_na_fallback_count = 0
-    _price_region = PRICING_LOOKUP_REGION
-    if _price_region != 'eu-west-1':
-        raise RuntimeError('Hourly pricing must use eu-west-1 bundled SKU table')
     for i in range(n):
         raw_inst = inst_series.iloc[i]
         raw_inst_norm = normalize_instance_string(raw_inst)
@@ -710,11 +462,6 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 a1s[i] = a2s[i] = NA
                 continue
             backend = _pricing_backend(inst)
-            if backend == 'rds' and not _is_rds_context_supported(work, i, cols, ins_idx, cc_idx):
-                cur_p[i] = a1p[i] = a2p[i] = None
-                a1i[i] = a2i[i] = NA
-                a1s[i] = a2s[i] = NA
-                continue
             rec = get_rds_recommendations(inst, cpu_filter=cpu) if backend == 'rds' else get_recommendations(inst, cpu_filter=cpu)
             alt1 = rec.get('alt1')
             alt2 = rec.get('alt2')
@@ -727,28 +474,11 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                     alt2 = None
             if alt1 and alt2 and (alt1 == alt2):
                 alt2 = None
-            row_region = _region_for_row(work, i, cols, ins_idx, cc_idx)
-            if row_region not in ('eu-west-1', 'us-east-1', 'ap-south-1', 'eu-central-1'):
-                row_region = PRICING_LOOKUP_REGION
+            row_region_raw = _row_region_value(work, i, cols, ins_idx, cc_idx)
+            row_region = _region_for_pricing(row_region_raw, default_region=region)
             p_cur = _hourly_cur(inst, os_engine, backend, region=row_region)
-            # For both EC2 and RDS, only show alternatives when current list price exists.
-            # This avoids "alt shown but prices/savings are N/A" confusion.
-            if p_cur is None:
-                alt1 = None
-                alt2 = None
-                p_a1 = None
-                p_a2 = None
-            else:
-                p_a1 = _hourly_alt(alt1, os_engine, backend, region=row_region)
-                p_a2 = _hourly_alt(alt2, os_engine, backend, region=row_region)
-                # For both EC2 and RDS, suppress alternatives with no local price.
-                if alt1 is not None and p_a1 is None:
-                    alt1 = None
-                if alt2 is not None and p_a2 is None:
-                    alt2 = None
-                # Recompute prices after suppression.
-                p_a1 = _hourly_alt(alt1, os_engine, backend, region=row_region)
-                p_a2 = _hourly_alt(alt2, os_engine, backend, region=row_region)
+            p_a1 = _hourly_alt(alt1, os_engine, backend, region=row_region)
+            p_a2 = _hourly_alt(alt2, os_engine, backend, region=row_region)
             cur_p[i] = p_cur
             a1i[i] = alt1 if alt1 is not None else NA
             if alt2 is not None:
@@ -781,7 +511,7 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             a1s[i] = a2s[i] = NA
     if _finops_debug:
         print(
-            f'[FinOps DEBUG] hourly_lookup_region={PRICING_LOOKUP_REGION} rows={n} ui_region={region!r}',
+            f'[FinOps DEBUG] row-region pricing rows={n} ui_region={region!r}',
             flush=True,
         )
         for j in range(min(5, n)):
@@ -789,7 +519,9 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             os_j = pricing_os_out[j]
             pj = cur_p[j]
             p_txt = f'{pj:.6f}' if isinstance(pj, (int, float)) and math.isfinite(float(pj)) else 'N/A'
-            print(f'[FinOps DEBUG] {inst_j} {os_j} {PRICING_LOOKUP_REGION} {p_txt}', flush=True)
+            row_region_raw_j = _row_region_value(work, j, cols, ins_idx, cc_idx)
+            row_region_j = _region_for_pricing(row_region_raw_j, default_region=region)
+            print(f'[FinOps DEBUG] {inst_j} {os_j} {row_region_j} {p_txt}', flush=True)
     discount_out = [_discount_pct_vs_list(act_out[i], cur_p[i]) for i in range(n)]
     _mid_lists = [
         pricing_os_out,

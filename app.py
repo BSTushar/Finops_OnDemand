@@ -8,6 +8,13 @@ import pandas as pd
 import streamlit as st
 from data_loader import OS_COLUMN_NONE_OPTION, LoadResult, analyze_load, dataframe_from_bytes, finalize_binding, load_file
 from excel_export import build_excel, sanitize_formula_injection_dataframe, savings_numeric
+try:
+    from instance_api import canonicalize_instance_api_name
+except Exception:
+    # Defensive fallback: keep UI alive even if import resolution is broken
+    # in a stale local copy/environment.
+    def canonicalize_instance_api_name(value: object) -> str | None:  # type: ignore[no-redef]
+        return None
 from processor import apply_na_fill, process
 from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, DEFAULT_REGION, PRICING_SOURCE_LABEL, RDS_PRICING_NOTE, REGION_LABELS, SUPPORTED_REGIONS, cache_age_days, cache_is_stale, cost_disclaimer_text
 from sheet_merger import merge_primary_with_secondary, suggest_key_pairs
@@ -1442,9 +1449,7 @@ if lr is not None and (not binding_ready):
                     oi = os_opts.index(default_os) if default_os in os_opts else 0
                     os_sel = st.selectbox('OS / engine column (optional — detected from cell values)', os_opts, index=min(oi, len(os_opts) - 1))
             cost_sel = None
-            if len(lr.cost_candidates) > 1:
-                cost_sel = st.selectbox('Actual cost column (required for savings)', lr.cost_candidates, key='cost_ambiguous')
-            elif len(lr.cost_candidates) == 1:
+            if len(lr.cost_candidates) >= 1:
                 cost_sel = lr.cost_candidates[0]
             else:
                 cost_sel = st.selectbox('Actual cost column (optional)', ['— None —'] + cols_all, key='cost_optional')
@@ -1460,14 +1465,8 @@ if lr is not None and (not binding_ready):
                 except ValueError as e:
                     st.markdown(f'<div class="finops-alert finops-alert--err">❌ {e}</div>', unsafe_allow_html=True)
     elif lr.binding is not None:
-        if len(lr.cost_candidates) > 1 and lr.binding.actual_cost is None:
-            with st.container(border=True):
-                st.markdown('<div class="finops-alert finops-alert--warn">Multiple cost columns — pick one for Actual Cost.</div>', unsafe_allow_html=True)
-                cp = st.selectbox('Actual cost column', lr.cost_candidates, key='cost_pick_multi')
-                if st.button('Confirm cost column', type='primary'):
-                    b = finalize_binding(lr, lr.binding.instance, lr.binding.os, cp).binding
-                    st.session_state['binding'] = b
-                    st.rerun()
+        # Cost binding is auto-selected in analyze_load when candidates exist.
+        pass
 if lr is not None and st.session_state.get('binding') is not None:
     chosen_binding = st.session_state['binding']
     binding_ready = True

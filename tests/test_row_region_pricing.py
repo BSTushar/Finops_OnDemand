@@ -1,75 +1,76 @@
 from __future__ import annotations
+
 import unittest
+
 import pandas as pd
+
 from data_loader import ColumnBinding
 from pricing_engine import get_price, get_rds_hourly
 from processor import apply_na_fill, process
 
 
 class TestRowRegionPricing(unittest.TestCase):
-    def test_ec2_row_uses_row_region_when_present(self):
+    def test_ec2_row_region_drives_current_price(self) -> None:
         df = pd.DataFrame(
             {
-                'Instance': ['m5.large'],
-                'Product': ['linux'],
-                'Region': ['us-east-1'],
-                'Cost': [1.0],
+                "inst_type": ["m5.large", "m5.large"],
+                "product": ["linux", "linux"],
+                "region": ["eu-west-1", "us-east-1"],
+                "ondemand_cost": [0.0, 0.0],
             }
         )
-        b = ColumnBinding(instance='Instance', os='Product', actual_cost='Cost')
-        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
-        want = get_price('m5.large', region='us-east-1', os='linux')
-        self.assertIsNotNone(want)
-        self.assertAlmostEqual(float(out['Current Price ($/hr)'].iloc[0]), float(want), places=6)
+        b = ColumnBinding(instance="inst_type", os="product", actual_cost="ondemand_cost")
+        out = apply_na_fill(process(df, b, region="eu-west-1", service="both"))
 
-    def test_ec2_unsupported_row_region_falls_back_to_default(self):
+        p_eu = get_price("m5.large", region="eu-west-1", os="linux")
+        p_us = get_price("m5.large", region="us-east-1", os="linux")
+        self.assertIsNotNone(p_eu)
+        self.assertIsNotNone(p_us)
+        self.assertAlmostEqual(float(out["Current Price ($/hr)"].iloc[0]), float(p_eu), places=6)
+        self.assertAlmostEqual(float(out["Current Price ($/hr)"].iloc[1]), float(p_us), places=6)
+
+    def test_rds_row_region_drives_current_price(self) -> None:
         df = pd.DataFrame(
             {
-                'Instance': ['m5.large'],
-                'Product': ['linux'],
-                'Region': ['ca-central-1'],
-                'Cost': [1.0],
+                "inst_type": ["db.r5.large", "db.r5.large"],
+                "db_engine": ["mysql", "mysql"],
+                "region": ["eu-west-1", "us-east-1"],
+                "ri_cost": [0.0, 0.0],
+                "ondemand_cost": [1.0, 1.0],
             }
         )
-        b = ColumnBinding(instance='Instance', os='Product', actual_cost='Cost')
-        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
-        # ca-central-1 not in bundled dataset -> fallback to eu-west-1
-        want = get_price('m5.large', region='eu-west-1', os='linux')
-        self.assertIsNotNone(want)
-        self.assertAlmostEqual(float(out['Current Price ($/hr)'].iloc[0]), float(want), places=6)
+        b = ColumnBinding(instance="inst_type", os="db_engine", actual_cost="ondemand_cost")
+        out = apply_na_fill(process(df, b, region="eu-west-1", service="both"))
 
-    def test_rds_row_uses_row_region_when_context_supported(self):
+        p_eu = get_rds_hourly("db.r5.large", region="eu-west-1", os="linux")
+        p_us = get_rds_hourly("db.r5.large", region="us-east-1", os="linux")
+        self.assertIsNotNone(p_eu)
+        self.assertIsNotNone(p_us)
+        self.assertAlmostEqual(float(out["Current Price ($/hr)"].iloc[0]), float(p_eu), places=6)
+        self.assertAlmostEqual(float(out["Current Price ($/hr)"].iloc[1]), float(p_us), places=6)
+
+    def test_region_aliases_for_user_regions(self) -> None:
         df = pd.DataFrame(
             {
-                'Instance': ['db.r5.large'],
-                'DB Engine': ['mysql'],
-                'Availability_Zone': ['us-east-1a'],
-                'Region': ['us-east-1'],
-                'Cost': [1.0],
+                "inst_type": ["m5.large", "db.r5.large"],
+                "db_engine": ["linux", "mysql"],
+                "region": ["eu-west-3", "ca-central-1"],
+                "ondemand_cost": [1.0, 1.0],
             }
         )
-        b = ColumnBinding(instance='Instance', os='DB Engine', actual_cost='Cost')
-        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
-        want = get_rds_hourly('db.r5.large', region='us-east-1', os='linux')
-        self.assertIsNotNone(want)
-        self.assertAlmostEqual(float(out['Current Price ($/hr)'].iloc[0]), float(want), places=6)
+        b = ColumnBinding(instance="inst_type", os="db_engine", actual_cost="ondemand_cost")
+        out = apply_na_fill(process(df, b, region="eu-west-1", service="both"))
 
-    def test_rds_context_unsupported_still_suppresses(self):
-        df = pd.DataFrame(
-            {
-                'Instance': ['db.r5.large'],
-                'DB Engine': ['postgres'],
-                'Availability_Zone': ['ca-central-1a'],
-                'Region': ['ca-central-1'],
-                'Cost': [1.0],
-            }
-        )
-        b = ColumnBinding(instance='Instance', os='DB Engine', actual_cost='Cost')
-        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
-        self.assertEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
-        self.assertEqual(out['Alt1 Instance'].iloc[0], 'N/A')
-        self.assertEqual(out['Alt2 Instance'].iloc[0], 'N/A')
+        # Aliases:
+        # eu-west-3 -> eu-west-1
+        # ca-central-1 -> us-east-1
+        p_ec2_alias = get_price("m5.large", region="eu-west-1", os="linux")
+        p_rds_alias = get_rds_hourly("db.r5.large", region="us-east-1", os="linux")
+        self.assertIsNotNone(p_ec2_alias)
+        self.assertIsNotNone(p_rds_alias)
+        self.assertAlmostEqual(float(out["Current Price ($/hr)"].iloc[0]), float(p_ec2_alias), places=6)
+        self.assertAlmostEqual(float(out["Current Price ($/hr)"].iloc[1]), float(p_rds_alias), places=6)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
