@@ -220,6 +220,17 @@ def _column_name_looks_monthly(column_name: str | None) -> bool:
         return True
     return False
 
+
+def _column_name_looks_sheet_price(column_name: str | None) -> bool:
+    if column_name is None:
+        return False
+    cn = str(column_name).strip().lower().replace(' ', '')
+    if not cn:
+        return False
+    priceish = ('price' in cn) or ('pricing' in cn) or ('rate' in cn) or ('unitprice' in cn)
+    costish = any((k in cn for k in ('cost', 'spend', 'amount', 'charge', 'billing')))
+    return bool(priceish and (not costish))
+
 def _to_float(v, *, column_name: str | None=None) -> float | None:
     col_monthly = False
     if column_name is not None:
@@ -282,6 +293,7 @@ def _resolve_actual_cost_for_row(
     fallback_cost_cols: list[str] | None,
     strict_month_only_when_present: bool=False,
     month_candidate_cols: list[str] | None=None,
+    prefer_alternative_non_month_when_selected_is_price_like: bool=False,
 ) -> float | None:
     """
     Per-row actual cost resolver:
@@ -291,10 +303,21 @@ def _resolve_actual_cost_for_row(
        - then non-month columns, rightmost valid fallback
     """
     seen_cols: set[str] = set()
+    selected_is_price_like = False
     if selected_cost_col:
         v = _to_float(row.get(selected_cost_col), column_name=selected_cost_col)
         if v is not None and v > 0:
-            return v
+            # If selected cost header appears to be sheet/list on-demand price and we have
+            # other non-month candidates, let fallback choose better actual-cost-like columns.
+            if not prefer_alternative_non_month_when_selected_is_price_like:
+                return v
+            cn = str(selected_cost_col).strip().lower()
+            selected_is_price_like = (
+                'on demand' in cn
+                or ('price' in cn and all((k not in cn for k in ('cost', 'spend', 'amount', 'charge', 'billing'))))
+            )
+            if not selected_is_price_like:
+                return v
         seen_cols.add(selected_cost_col)
     selected_is_month_like = _column_name_looks_monthly(selected_cost_col) if selected_cost_col else False
     has_month_candidates = bool(month_candidate_cols)
@@ -319,6 +342,8 @@ def _resolve_actual_cost_for_row(
             return None
         # Fallback: rightmost valid non-month column.
         for c in reversed(non_month_cols):
+            if selected_is_price_like and c == selected_cost_col:
+                continue
             v = _to_float(row.get(c), column_name=c)
             if v is not None and v > 0:
                 return v
@@ -404,6 +429,7 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             selected_cost_col=cc,
             fallback_cost_cols=fallback_cost_cols,
             month_candidate_cols=fallback_cost_cols,
+            prefer_alternative_non_month_when_selected_is_price_like=True,
             strict_month_only_when_present=bool(
                 (cc and _column_name_looks_monthly(cc))
                 or any((_column_name_looks_monthly(c) for c in (fallback_cost_cols or [])))

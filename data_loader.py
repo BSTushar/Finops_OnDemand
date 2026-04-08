@@ -181,6 +181,15 @@ def _header_looks_like_sheet_price(h: object) -> bool:
     return bool(priceish and (not costish))
 
 
+def _header_looks_like_actual_cost(h: object) -> bool:
+    n = _norm_header(str(h)).replace(' ', '')
+    if not n:
+        return False
+    if any((k in n for k in ('ri', 'reserved', 'on demand', 'ondemand', 'total', 'spend', 'billing', 'cost'))):
+        return True
+    return False
+
+
 def _is_empty_like(v: object) -> bool:
     if v is None:
         return True
@@ -209,9 +218,14 @@ def _cost_columns_priority(df: pd.DataFrame, candidates: list[str]) -> list[str]
         reverse=True,
     )
     others = [c for c in candidates if c not in month_cols_sorted]
+    if not others:
+        return month_cols_sorted
     idx = {c: i for i, c in enumerate(df.columns)}
-    others_sorted = sorted(others, key=lambda c: idx.get(c, -1), reverse=True)
-    return month_cols_sorted + others_sorted
+    strong = [c for c in others if _header_looks_like_actual_cost(c)]
+    weak = [c for c in others if c not in strong]
+    strong_sorted = sorted(strong, key=lambda c: idx.get(c, -1), reverse=True)
+    weak_sorted = sorted(weak, key=lambda c: idx.get(c, -1), reverse=True)
+    return month_cols_sorted + strong_sorted + weak_sorted
 
 
 def cost_candidate_columns(df: pd.DataFrame, skip_cols: set[str] | None=None) -> list[str]:
@@ -299,24 +313,42 @@ def _rank_cost_columns(candidates: list[str]) -> list[str]:
     if len(candidates) <= 1:
         return list(candidates)
 
+    def semantic_bucket(raw: str, norm_no_space: str) -> int:
+        # Lower is better.
+        if any((k in norm_no_space for k in ('actualcost', 'totalcost', 'billingamount', 'netcost', 'grosscost'))):
+            return 0
+        if any((k in norm_no_space for k in ('amortizedcost', 'effectivecost', 'finalcost'))):
+            return 1
+        if any((k in norm_no_space for k in ('blendedcost', 'unblendedcost'))):
+            return 2
+        if any((k in norm_no_space for k in ('ondemandcost', 'ondemandspend', 'ondemandamount'))):
+            return 3
+        if any((k in norm_no_space for k in ('savingsplancost', 'spcost', 'spendunder'))):
+            return 4
+        if any((k in norm_no_space for k in ('ricost', 'reservedinstancecost', 'reservationcost'))):
+            return 5
+        if any((k in norm_no_space for k in ('cost', 'spend', 'amount', 'billing', 'charge'))):
+            return 6
+        if _header_looks_like_sheet_price(raw):
+            return 9
+        return 7
+
     def rank_key(name: object) -> tuple[int, str]:
         raw = str(name)
         n = _norm_header(raw).replace(' ', '')
         ym = _latest_month_from_header(raw)
         if ym is not None:
             # Newest month first.
-            return (0, -(ym[0] * 100 + ym[1]), raw)
-        if _header_looks_like_sheet_price(raw):
-            return (9, 0, raw)
+            return (0, f'{-(ym[0] * 100 + ym[1]):08d}:{raw}')
         if n == 'totalcostusd' or n == 'total_cost_usd':
-            return (1, 0, raw)
+            return (1, raw)
         if 'total' in n and 'cost' in n and 'usd' in n:
-            return (2, 0, raw)
+            return (2, raw)
         if 'total' in n and 'cost' in n:
-            return (3, 0, raw)
+            return (3, raw)
         if n.startswith('total'):
-            return (4, 0, raw)
-        return (5, 0, raw)
+            return (4, raw)
+        return (5 + semantic_bucket(raw, n), raw)
 
     return sorted(candidates, key=rank_key)
 
@@ -509,13 +541,14 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
         skip_for_cost.add(os_col)
     (cost_c, cost_inferred_values) = find_cost_columns_combined(df, skip_for_cost)
     cost_c = _rank_cost_columns(cost_c)
-    monthly_cost_cols = [c for c in cost_c if _latest_month_from_header(c) is not None]
+    ordered_cost = _cost_columns_priority(df, cost_c)
+    monthly_cost_cols = [c for c in ordered_cost if _latest_month_from_header(c) is not None]
     selected_cost: str | None = None
     if monthly_cost_cols:
         selected_cost = monthly_cost_cols[0]
-    elif len(cost_c) == 1:
-        selected_cost = cost_c[0]
-    needs_cost_pick = len(cost_c) > 1 and selected_cost is None
+    elif len(ordered_cost) == 1:
+        selected_cost = ordered_cost[0]
+    needs_cost_pick = len(ordered_cost) > 1 and selected_cost is None
     needs_i = inst_amb or inst_col is None
     needs_o = os_amb
     inst_c_list = list(dict.fromkeys(inst_ui if needs_i else ([inst_col] if inst_col is not None else [])))
@@ -526,13 +559,13 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
         warnings.append('Multiple columns match OS-like values — pick the one that represents OS / engine.')
     if (not needs_o) and os_col is None and (not needs_i):
         warnings.append('No OS-like column detected from cell values — pricing uses Linux for all rows (see Pricing OS column).')
-    if len(cost_c) == 0:
+    if len(ordered_cost) == 0:
         warnings.append('No cost/spend/amount column auto-detected — savings will be N/A without selection.')
-    elif len(cost_c) > 1 and selected_cost is None:
-        warnings.append(f'Multiple cost-like columns found ({len(cost_c)}) — please choose Actual Cost column.')
-    elif len(cost_c) > 1 and selected_cost is not None:
+    elif len(ordered_cost) > 1 and selected_cost is None:
+        warnings.append(f'Multiple cost-like columns found ({len(ordered_cost)}) — please choose Actual Cost column.')
+    elif len(ordered_cost) > 1 and selected_cost is not None:
         warnings.append(
-            f"Multiple cost-like columns found ({len(cost_c)}) — auto-selected '{selected_cost}'"
+            f"Multiple cost-like columns found ({len(ordered_cost)}) — auto-selected '{selected_cost}'"
             ' (latest monthly column).'
         )
     elif cost_inferred_values:
@@ -540,7 +573,7 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
     binding: ColumnBinding | None = None
     if not needs_i and (not needs_o) and inst_col is not None:
         binding = ColumnBinding(instance=inst_col, os=os_col, actual_cost=selected_cost)
-    return LoadResult(df=df, warnings=warnings, instance_candidates=inst_c_list, os_candidates=os_c_list, cost_candidates=cost_c, binding=binding, needs_instance_pick=needs_i, needs_os_pick=needs_o, needs_cost_pick=needs_cost_pick and len(cost_c) > 1)
+    return LoadResult(df=df, warnings=warnings, instance_candidates=inst_c_list, os_candidates=os_c_list, cost_candidates=ordered_cost, binding=binding, needs_instance_pick=needs_i, needs_os_pick=needs_o, needs_cost_pick=needs_cost_pick and len(ordered_cost) > 1)
 
 def _normalize_loaded_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Blank strings → NA without deprecated replace downcasting; keeps non-object dtypes."""
