@@ -348,7 +348,9 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
         skip_for_cost.add(os_col)
     (cost_c, cost_inferred_values) = find_cost_columns_combined(df, skip_for_cost)
     cost_c = _rank_cost_columns(cost_c)
-    needs_cost_pick = len(cost_c) > 1
+    # Auto-pick best cost candidate even when multiple are detected.
+    selected_cost: str | None = cost_c[0] if len(cost_c) >= 1 else None
+    needs_cost_pick = False
     needs_i = inst_amb or inst_col is None
     needs_o = os_amb
     inst_c_list = list(dict.fromkeys(inst_ui if needs_i else ([inst_col] if inst_col is not None else [])))
@@ -362,12 +364,14 @@ def analyze_load(df: pd.DataFrame, base_warnings: list[str]) -> LoadResult:
     if len(cost_c) == 0:
         warnings.append('No cost/spend/amount column auto-detected — savings will be N/A without selection.')
     elif len(cost_c) > 1:
-        warnings.append(f'Multiple cost-like columns found ({len(cost_c)}) — please choose Actual Cost column.')
+        warnings.append(
+            f"Multiple cost-like columns found ({len(cost_c)}) — auto-selected '{selected_cost}'."
+        )
     elif cost_inferred_values:
         warnings.append('Cost column inferred from numeric values — confirm it is the spend you want for savings %.')
     binding: ColumnBinding | None = None
     if not needs_i and (not needs_o) and inst_col is not None:
-        binding = ColumnBinding(instance=inst_col, os=os_col, actual_cost=cost_c[0] if len(cost_c) == 1 else None)
+        binding = ColumnBinding(instance=inst_col, os=os_col, actual_cost=selected_cost)
     return LoadResult(df=df, warnings=warnings, instance_candidates=inst_c_list, os_candidates=os_c_list, cost_candidates=cost_c, binding=binding, needs_instance_pick=needs_i, needs_os_pick=needs_o, needs_cost_pick=needs_cost_pick and len(cost_c) > 1)
 
 def _normalize_loaded_dataframe(df: pd.DataFrame) -> pd.DataFrame:
