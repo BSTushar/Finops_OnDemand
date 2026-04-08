@@ -10,7 +10,7 @@ from pandas.testing import assert_frame_equal, assert_series_equal
 from data_loader import ColumnBinding, require_unique_column_names
 from instance_api import canonicalize_instance_api_name
 from os_resolve import cell_matches_valid_os_pattern, classify_os_kind
-from pricing_engine import DEFAULT_REGION, PRICING_LOOKUP_REGION, get_price, get_rds_hourly
+from pricing_engine import DEFAULT_REGION, SUPPORTED_REGIONS, get_price, get_rds_hourly
 from pricing_normalize import LINUX_FALLBACK_LABEL, normalize_instance_string, normalize_os_engine_key, normalize_pricing_os_label
 from recommender import CPUFilterMode, get_recommendations, is_graviton_family
 from rds_recommender import get_rds_recommendations
@@ -109,24 +109,72 @@ def _pricing_backend(inst: str) -> Literal['ec2', 'rds']:
     """Hourly + alt SKUs: db.* → RDS tables + rds_recommender; everything else → EC2."""
     return 'rds' if normalize_instance_string(inst).startswith('db.') else 'ec2'
 
-def _hourly_cur(inst: str, os_engine: str, backend: Literal['ec2', 'rds']) -> float | None:
-    """Always use PRICING_LOOKUP_REGION (eu-west-1) for on-demand hourly SKUs."""
+def _hourly_cur(inst: str, os_engine: str, backend: Literal['ec2', 'rds'], *, region: str) -> float | None:
+    """Use row-resolved region for on-demand hourly SKUs."""
     inst_key = normalize_instance_string(inst)
     if not inst_key:
         return None
     if backend == 'rds':
         # Bundled RDS table is MySQL Single-AZ class rates (Linux-oriented); use linux key for lookup.
-        return get_rds_hourly(inst_key, region=PRICING_LOOKUP_REGION, os='linux')
-    return get_price(inst_key, region=PRICING_LOOKUP_REGION, os=os_engine)
+        return get_rds_hourly(inst_key, region=region, os='linux')
+    return get_price(inst_key, region=region, os=os_engine)
 
 
-def _hourly_alt(alt: str | None, os_engine: str, backend: Literal['ec2', 'rds']) -> float | None:
+def _hourly_alt(alt: str | None, os_engine: str, backend: Literal['ec2', 'rds'], *, region: str) -> float | None:
     if not alt or not isinstance(alt, str):
         return None
     a = str(alt).strip()
     if a in (NA, ALT2_NO_DISTINCT, ALT2_INCOMPATIBLE_OS) or not a or a.lower() in ('nan', 'none'):
         return None
-    return _hourly_cur(normalize_instance_string(alt), os_engine, backend)
+    return _hourly_cur(normalize_instance_string(alt), os_engine, backend, region=region)
+
+
+_SUPPORTED_REGION_IDS: frozenset[str] = frozenset((rid for rid, _label in SUPPORTED_REGIONS))
+_ROW_REGION_ALIASES: dict[str, str] = {
+    # Local bundled tables do not have direct entries for these in this build.
+    'eu-west-3': 'eu-west-1',
+    'ca-central-1': 'us-east-1',
+}
+_REGION_ID_RE = re.compile(r'\b([a-z]{2}-[a-z-]+-\d)\b', re.IGNORECASE)
+
+
+def _region_for_pricing(raw_region: object, *, default_region: str) -> str:
+    s = normalize_instance_string(raw_region).replace('_', '-')
+    m = _REGION_ID_RE.search(s)
+    rid = (m.group(1) if m else s).strip().lower()
+    if rid in _ROW_REGION_ALIASES:
+        return _ROW_REGION_ALIASES[rid]
+    if rid in _SUPPORTED_REGION_IDS:
+        return rid
+    d = normalize_instance_string(default_region).replace('_', '-').strip().lower()
+    return d if d in _SUPPORTED_REGION_IDS else DEFAULT_REGION
+
+
+def _row_region_value(
+    work: pd.DataFrame,
+    row_i: int,
+    cols: list,
+    ins_idx: int,
+    cc_idx: int | None,
+) -> object | None:
+    """
+    Detect row region from any region-like column first, then from any cell token.
+    """
+    for j, c in enumerate(cols):
+        if j == ins_idx or (cc_idx is not None and j == cc_idx):
+            continue
+        if 'region' not in _norm_header(c):
+            continue
+        v = work.iat[row_i, j]
+        if _nonempty_cell(v):
+            return v
+    for j, _c in enumerate(cols):
+        if j == ins_idx or (cc_idx is not None and j == cc_idx):
+            continue
+        v = work.iat[row_i, j]
+        if _nonempty_cell(v) and _REGION_ID_RE.search(str(v)):
+            return v
+    return None
 
 
 def _family_token_from_instance(api_name: str) -> str:
@@ -386,9 +434,6 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
     pricing_os_out: list[str] = [LINUX_FALLBACK_LABEL] * n
     cpu: CPUFilterMode = cpu_filter if cpu_filter in ('default', 'intel', 'graviton', 'both') else 'both'
     row_na_fallback_count = 0
-    _price_region = PRICING_LOOKUP_REGION
-    if _price_region != 'eu-west-1':
-        raise RuntimeError('Hourly pricing must use eu-west-1 bundled SKU table')
     for i in range(n):
         raw_inst = inst_series.iloc[i]
         raw_inst_norm = normalize_instance_string(raw_inst)
@@ -429,9 +474,11 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                     alt2 = None
             if alt1 and alt2 and (alt1 == alt2):
                 alt2 = None
-            p_cur = _hourly_cur(inst, os_engine, backend)
-            p_a1 = _hourly_alt(alt1, os_engine, backend)
-            p_a2 = _hourly_alt(alt2, os_engine, backend)
+            row_region_raw = _row_region_value(work, i, cols, ins_idx, cc_idx)
+            row_region = _region_for_pricing(row_region_raw, default_region=region)
+            p_cur = _hourly_cur(inst, os_engine, backend, region=row_region)
+            p_a1 = _hourly_alt(alt1, os_engine, backend, region=row_region)
+            p_a2 = _hourly_alt(alt2, os_engine, backend, region=row_region)
             cur_p[i] = p_cur
             a1i[i] = alt1 if alt1 is not None else NA
             if alt2 is not None:
@@ -464,7 +511,7 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             a1s[i] = a2s[i] = NA
     if _finops_debug:
         print(
-            f'[FinOps DEBUG] hourly_lookup_region={PRICING_LOOKUP_REGION} rows={n} ui_region={region!r}',
+            f'[FinOps DEBUG] row-region pricing rows={n} ui_region={region!r}',
             flush=True,
         )
         for j in range(min(5, n)):
@@ -472,7 +519,9 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             os_j = pricing_os_out[j]
             pj = cur_p[j]
             p_txt = f'{pj:.6f}' if isinstance(pj, (int, float)) and math.isfinite(float(pj)) else 'N/A'
-            print(f'[FinOps DEBUG] {inst_j} {os_j} {PRICING_LOOKUP_REGION} {p_txt}', flush=True)
+            row_region_raw_j = _row_region_value(work, j, cols, ins_idx, cc_idx)
+            row_region_j = _region_for_pricing(row_region_raw_j, default_region=region)
+            print(f'[FinOps DEBUG] {inst_j} {os_j} {row_region_j} {p_txt}', flush=True)
     discount_out = [_discount_pct_vs_list(act_out[i], cur_p[i]) for i in range(n)]
     _mid_lists = [
         pricing_os_out,
