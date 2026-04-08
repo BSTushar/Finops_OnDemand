@@ -1016,6 +1016,50 @@ def _instance_family_token(cell: object) -> str:
     return ''
 
 
+def _resolve_instance_column_for_view(df: pd.DataFrame, bound_instance_col: str | None) -> str | None:
+    """
+    Prefer mapped instance column; fallback by scanning for AWS API-like values.
+    This keeps EC2/RDS filters functional even when binding state is stale.
+    """
+    if bound_instance_col and bound_instance_col in df.columns:
+        return bound_instance_col
+    if df.empty:
+        return None
+    best_col: str | None = None
+    best_ratio = 0.0
+    sample_n = min(len(df), 2000)
+    for c in df.columns:
+        ser = df[c].iloc[:sample_n]
+        non_empty = 0
+        valid = 0
+        for v in ser:
+            if v is None:
+                continue
+            try:
+                if pd.isna(v):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            s = str(v).strip()
+            if not s or s.lower() in ('nan', 'none', 'n/a'):
+                continue
+            non_empty += 1
+            if canonicalize_instance_api_name(v) is not None:
+                valid += 1
+        if non_empty == 0:
+            continue
+        ratio = valid / non_empty
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_col = str(c)
+    return best_col if best_ratio >= 0.2 else None
+
+
+def _is_rds_instance_cell(cell: object) -> bool:
+    canon = canonicalize_instance_api_name(cell)
+    return bool(canon and canon.startswith('db.'))
+
+
 def _is_old_gen_instance_cell(cell: object) -> bool:
     fam = _instance_family_token(cell)
     if not fam:
@@ -1458,17 +1502,18 @@ if df_out is not None:
         st.markdown('<div class="finops-flow-step" style="margin-top:0.5rem;border-bottom:none;"><span class="finops-flow-num" style="background:var(--st-green-color,#34c759);">4</span><div><p class="finops-flow-title">Results</p><p class="finops-flow-sub">Filter and search the table, then download Excel or CSV.</p></div></div>', unsafe_allow_html=True)
         (f1, f2, f3, f4) = st.columns([1, 1, 1, 3])
         with f1:
-            vf_svc = st.radio('View service', ['all', 'ec2', 'rds'], format_func=lambda x: {'all': 'Both (show all)', 'ec2': 'EC2 rows only', 'rds': 'RDS rows only'}[x], horizontal=True)
+            vf_svc = st.radio('View service', ['all', 'ec2', 'rds'], format_func=lambda x: {'all': 'Both (show all)', 'ec2': 'EC2 rows only', 'rds': 'RDS rows only'}[x], horizontal=True, key='vf_svc')
         with f2:
             st.caption('CPU (enrichment)')
             st.write(str(st.session_state.get('cpu_filter', 'both')).title())
         with f3:
-            vf_os = st.text_input('OS contains', placeholder='filter…')
+            vf_os = st.text_input('OS contains', placeholder='filter…', key='vf_os')
         with f4:
-            q = st.text_input('Search', placeholder='any column…')
+            q = st.text_input('Search', placeholder='any column…', key='vf_search')
         view = df_out.copy()
         bind = st.session_state.get('binding')
-        inst_col = bind.instance if bind else None
+        bound_inst_col = bind.instance if bind else None
+        inst_col = _resolve_instance_column_for_view(view, bound_inst_col)
 
         def _first_col_pos(frame: pd.DataFrame, name: str | None) -> int | None:
             if not name:
@@ -1480,10 +1525,12 @@ if df_out is not None:
                 return None
 
         ii = _first_col_pos(view, inst_col)
-        if vf_svc == 'ec2' and ii is not None:
-            view = view[~view.iloc[:, ii].astype(str).str.lower().str.strip().str.startswith('db.')]
-        elif vf_svc == 'rds' and ii is not None:
-            view = view[view.iloc[:, ii].astype(str).str.lower().str.strip().str.startswith('db.')]
+        if ii is not None:
+            inst_ser = view.iloc[:, ii].map(_is_rds_instance_cell)
+            if vf_svc == 'ec2':
+                view = view[~inst_ser]
+            elif vf_svc == 'rds':
+                view = view[inst_ser]
         os_col_name = bind.os if bind else None
         if vf_os:
             oi = _first_col_pos(view, os_col_name)
