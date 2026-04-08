@@ -35,8 +35,8 @@ class TestCostPriorityRealisticColumns(unittest.TestCase):
         )
         b = ColumnBinding(instance='API Name', os='Product', actual_cost='On Demand Cost')
         out = process(df, b, region='eu-west-1', service='both')
-        # On-demand-like headers are de-prioritized for actual cost in processor fallback.
-        self.assertAlmostEqual(float(out['Actual Cost ($)'].iloc[0]), 120.0, places=8)
+        # Explicitly selected cost column is respected when it is an actual-cost-like header.
+        self.assertAlmostEqual(float(out['Actual Cost ($)'].iloc[0]), 999.0, places=8)
 
 
 if __name__ == '__main__':

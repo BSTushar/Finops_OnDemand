@@ -312,10 +312,11 @@ def _resolve_actual_cost_for_row(
             if not prefer_alternative_non_month_when_selected_is_price_like:
                 return v
             cn = str(selected_cost_col).strip().lower()
-            selected_is_price_like = (
-                'on demand' in cn
-                or ('price' in cn and all((k not in cn for k in ('cost', 'spend', 'amount', 'charge', 'billing'))))
-            )
+            priceish = ('price' in cn) or ('rate' in cn) or ('unitprice' in cn) or ('unit price' in cn)
+            costish = any((k in cn for k in ('cost', 'spend', 'amount', 'charge', 'billing', 'ri', 'reserved')))
+            # Treat as sheet-price-like only when it looks like a price/rate field without
+            # explicit cost semantics. Example: "List Price", "Rate Card Price".
+            selected_is_price_like = bool(priceish and (not costish))
             if not selected_is_price_like:
                 return v
         seen_cols.add(selected_cost_col)
