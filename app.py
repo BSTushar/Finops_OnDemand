@@ -191,16 +191,35 @@ def _enriched_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
 st.set_page_config(page_title='FinOps Optimizer', page_icon='◆', layout='wide', initial_sidebar_state='collapsed')
 FINOPS_UI_CSS = """
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=Figtree:wght@300;400;500;600;700&display=swap');
+:root {
+  --finops-white: #ffffff;
+  --finops-off: #f5f5f7;
+  --finops-off-2: #e8e8ed;
+  --finops-text: #1d1d1f;
+  --finops-mid: #6e6e73;
+  --finops-light: #a1a1a6;
+  --finops-green: #00b386;
+  --finops-blue: #0071e3;
+  --finops-radius: 18px;
+}
 html { color-scheme: light; }
+body {
+  font-family: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: var(--finops-text);
+}
 #MainMenu { visibility: hidden; }
 [data-testid="stFooter"] { visibility: hidden; }
 section[data-testid="stApp"] {
-  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 32%, #f1f5f9 100%) !important;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 110%, rgba(0,179,134,.08) 0%, transparent 70%),
+    radial-gradient(ellipse 60% 40% at 20% 80%, rgba(0,113,227,.05) 0%, transparent 60%),
+    linear-gradient(180deg, #f8fafc 0%, #ffffff 32%, #f1f5f9 100%) !important;
 }
 section[data-testid="stApp"] .main .block-container {
   padding-top: 1.25rem;
   padding-bottom: 2rem;
-  max-width: 1200px;
+  max-width: 1220px;
 }
 
 @keyframes finops-fade-up {
@@ -239,13 +258,13 @@ section[data-testid="stApp"] .main .block-container {
 }
 
 .finops-hero {
-  padding: 2.5rem 1rem 2rem;
+  padding: 2.8rem 1rem 2.1rem;
   margin-bottom: 0.5rem;
   width: 100%;
   box-sizing: border-box;
   position: relative;
   overflow: hidden;
-  border-radius: 0 0 24px 24px;
+  border-radius: 0 0 28px 28px;
 }
 .finops-hero::before {
   content: "";
@@ -316,21 +335,26 @@ section[data-testid="stApp"] .main .block-container {
   color: color-mix(in srgb, var(--st-text-color, CanvasText) 72%, var(--st-background-color, Canvas));
 }
 .finops-headline {
-  font-size: clamp(2.35rem, 5.5vw, 3.05rem);
-  font-weight: 700;
-  letter-spacing: -0.035em;
-  line-height: 1.08;
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: clamp(2.7rem, 6.4vw, 4.1rem);
+  font-weight: 900;
+  letter-spacing: -0.05em;
+  line-height: 0.98;
   margin: 0 0 0.5rem;
   padding: 0;
   width: 100%;
   text-align: center;
   text-wrap: balance;
-  color: #0f172a;
+  color: var(--finops-text);
+}
+.finops-headline em {
+  color: var(--finops-green);
+  font-style: italic;
 }
 .finops-subheadline {
   font-size: clamp(1.05rem, 2.2vw, 1.25rem);
-  font-weight: 500;
-  line-height: 1.45;
+  font-weight: 300;
+  line-height: 1.55;
   margin: 0 0 1rem;
   padding: 0;
   max-width: 38rem;
@@ -339,7 +363,7 @@ section[data-testid="stApp"] .main .block-container {
   margin-right: auto;
   text-align: center;
   text-wrap: balance;
-  color: #334155;
+  color: var(--finops-mid);
 }
 .finops-hero-badges {
   display: flex;
@@ -370,10 +394,10 @@ section[data-testid="stApp"] .main .block-container {
   background: color-mix(in srgb, var(--st-primary-color, #0068c9) 8%, #ffffff);
 }
 .finops-tagline {
-  font-size: 1rem;
-  font-weight: 400;
+  font-size: 1.01rem;
+  font-weight: 300;
   margin: 0 0 1.15rem;
-  line-height: 1.6;
+  line-height: 1.68;
   max-width: 34rem;
   width: 100%;
   margin-left: auto;
@@ -381,7 +405,7 @@ section[data-testid="stApp"] .main .block-container {
   padding: 0;
   text-align: center;
   text-wrap: balance;
-  color: #64748b;
+  color: var(--finops-mid);
 }
 .finops-pill {
   display: inline-block;
@@ -712,10 +736,10 @@ div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid
   color: #64748b;
 }
 section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
-  border-radius: 16px !important;
-  border: 1px solid #e2e8f0 !important;
-  background: #ffffff !important;
-  box-shadow: 0 2px 16px rgba(15, 23, 42, 0.05) !important;
+  border-radius: var(--finops-radius) !important;
+  border: 1px solid var(--finops-off-2) !important;
+  background: var(--finops-white) !important;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.08) !important;
   padding-top: 0.75rem !important;
   padding-bottom: 1rem !important;
   margin-bottom: 1.35rem !important;
@@ -780,11 +804,12 @@ section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
   .finops-flow-step:hover .finops-flow-num { transform: none; }
 }
 .finops-flow-title {
-  font-size: 1.4rem;
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.46rem;
   font-weight: 700;
-  letter-spacing: -0.025em;
+  letter-spacing: -0.03em;
   margin: 0;
-  color: #0f172a;
+  color: var(--finops-text);
 }
 .finops-flow-sub {
   font-size: 0.9375rem;
@@ -794,69 +819,83 @@ section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
 }
 
 .finops-card {
-  background: var(--st-secondary-background-color, rgba(128, 128, 128, 0.06));
-  border: 1px solid color-mix(in srgb, var(--st-border-color, #88888840) 100%, transparent);
-  border-radius: 18px;
+  background: var(--finops-white);
+  border: 1px solid var(--finops-off-2);
+  border-radius: var(--finops-radius);
   padding: 1.5rem 1.75rem;
   margin: 1.5rem 0 0.5rem;
-  box-shadow: 0 2px 12px color-mix(in srgb, var(--st-text-color, #000) 6%, transparent);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.08);
   color: var(--st-text-color, inherit);
   transition: box-shadow 0.28s ease, border-color 0.28s ease, transform 0.28s ease;
 }
 .finops-card:not(.finops-trust-panel):hover {
-  border-color: color-mix(in srgb, var(--st-border-color, #88888840) 70%, var(--st-primary-color, #0071e3));
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--st-text-color, #000) 9%, transparent);
+  border-color: color-mix(in srgb, var(--finops-blue) 30%, var(--finops-off-2));
+  box-shadow: 0 12px 48px rgba(0,0,0,0.12);
+  transform: translateY(-2px);
 }
-.finops-card .finops-card-title { font-size: 0.9rem; font-weight: 600; margin: 0 0 0.65rem; color: var(--st-text-color, inherit); }
-.finops-card .finops-card-body { font-size: 0.8125rem; line-height: 1.55; margin: 0.4rem 0 0; color: color-mix(in srgb, var(--st-text-color, CanvasText) 76%, var(--st-background-color, Canvas)); }
+.finops-card .finops-card-title {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.65rem;
+  color: var(--finops-text);
+}
+.finops-card .finops-card-body {
+  font-size: 0.85rem;
+  line-height: 1.65;
+  margin: 0.4rem 0 0;
+  color: var(--finops-mid);
+}
 .finops-card code { font-size: 0.8em; padding: 0.1em 0.35em; border-radius: 4px; background: color-mix(in srgb, var(--st-background-color, #f5f5f5) 94%, var(--st-text-color, #000) 6%); color: var(--st-text-color, inherit); }
 
 .finops-sec {
   font-size: 0.72rem;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   margin: 0 0 0.5rem;
-  color: color-mix(in srgb, var(--st-text-color, CanvasText) 68%, var(--st-background-color, Canvas));
+  color: var(--finops-mid);
 }
 
 .finops-metric {
-  border-radius: 14px;
-  padding: 1.05rem 1.2rem;
+  border-radius: 20px;
+  padding: 1.2rem 1.3rem;
   transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease, border-color 0.25s ease;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  color: #0f172a;
+  background: var(--finops-white);
+  border: 1px solid var(--finops-off-2);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+  color: var(--finops-text);
 }
 .finops-metric:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
-  border-color: #cbd5e1;
+  transform: translateY(-2px) scale(1.01);
+  box-shadow: 0 12px 48px rgba(0,0,0,0.12);
+  border-color: color-mix(in srgb, var(--finops-blue) 20%, var(--finops-off-2));
 }
 @media (prefers-reduced-motion: reduce) {
   .finops-metric:hover { transform: translateY(-1px); }
 }
 .finops-metric-label {
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #64748b;
+  color: var(--finops-light);
 }
 .finops-metric-value {
-  font-size: 1.4rem;
-  font-weight: 700;
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.56rem;
+  font-weight: 900;
   margin-top: 0.3rem;
-  color: #0f172a;
-  letter-spacing: -0.02em;
+  color: var(--finops-text);
+  letter-spacing: -0.03em;
 }
 .finops-metric--savings {
   background: linear-gradient(145deg, #ecfdf5 0%, #f0fdf4 100%);
-  border-color: #bbf7d0;
+  border-color: color-mix(in srgb, var(--finops-green) 32%, #bbf7d0);
 }
-.finops-metric--savings .finops-metric-value { color: #166534; }
-.finops-metric--savings .finops-metric-label { color: #15803d; }
+.finops-metric--savings .finops-metric-value { color: #0c7d61; }
+.finops-metric--savings .finops-metric-label { color: #0f7a60; }
 .finops-metric--risk {
   background: linear-gradient(145deg, #fef2f2 0%, #fff1f2 100%);
   border-color: #fecaca;
@@ -878,7 +917,7 @@ section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
 
 .finops-alert {
   padding: 0.85rem 1.1rem;
-  border-radius: 12px;
+  border-radius: 14px;
   font-size: 0.875rem;
   line-height: 1.5;
   margin: 0.5rem 0;
@@ -887,6 +926,7 @@ section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
   animation: finops-fade-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
+.finops-alert strong { font-family: 'Playfair Display', Georgia, serif; font-weight: 700; }
 .finops-alert:hover {
   transform: translateX(2px);
   box-shadow: 0 2px 12px color-mix(in srgb, var(--st-text-color, #000) 6%, transparent);
@@ -915,7 +955,7 @@ section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
   margin: 2rem 0;
   border: none;
   height: 2px;
-  border-radius: 2px;
+  border-radius: 8px;
   background: linear-gradient(
     90deg,
     transparent,
@@ -1360,7 +1400,7 @@ pill = f'Dataset {cache_age_days()}d old — consider refresh' if stale else 'Li
 _pill_class = 'finops-pill finops-pill--stale' if stale else 'finops-pill finops-pill--fresh'
 st.markdown(f'''<div class="finops-hero"><div class="finops-hero-inner">
 <p class="finops-eyebrow">Airbus internal · FinOps decision support</p>
-<h1 class="finops-headline">FinOps Optimizer</h1>
+<h1 class="finops-headline">FinOps Optimizer<br><em>Map once. Save millions.</em></h1>
 <p class="finops-subheadline">List-price intelligence for EC2 &amp; RDS — map once, enrich, export with full audit context.</p>
 <div class="finops-hero-badges">
 <span class="finops-hero-badge">Fully local · no external APIs</span>
