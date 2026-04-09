@@ -202,6 +202,7 @@ FINOPS_UI_CSS = """
   --finops-green: #00b386;
   --finops-blue: #0071e3;
   --finops-radius: 18px;
+  --finops-content-max: 1040px;
 }
 html { color-scheme: light; }
 body {
@@ -221,6 +222,11 @@ section[data-testid="stApp"] .main .block-container {
   padding-bottom: 2rem;
   max-width: 1220px;
 }
+section[data-testid="stApp"] .main .block-container > div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {
+  max-width: var(--finops-content-max);
+  margin-left: auto;
+  margin-right: auto;
+}
 
 @keyframes finops-fade-up {
   from { opacity: 0; transform: translateY(12px); }
@@ -238,6 +244,14 @@ section[data-testid="stApp"] .main .block-container {
   0%, 100% { box-shadow: 0 1px 3px color-mix(in srgb, var(--st-text-color, #000) 8%, transparent); }
   50% { box-shadow: 0 2px 10px color-mix(in srgb, var(--st-primary-color, #0071e3) 22%, transparent), 0 1px 3px color-mix(in srgb, var(--st-text-color, #000) 6%, transparent); }
 }
+@keyframes finops-float-soft {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+@keyframes finops-story-slide {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .finops-hero::before,
@@ -251,7 +265,10 @@ section[data-testid="stApp"] .main .block-container {
   .finops-divider,
   .finops-pipeline,
   .finops-pipeline-step--current,
-  .finops-hero-inner .finops-pill--stale {
+  .finops-hero-inner .finops-pill--stale,
+  .finops-hero-badge,
+  .finops-storyline-pill,
+  .finops-storyline-pill--accent {
     animation: none !important;
   }
   .finops-hero::before { opacity: 0.5 !important; transform: none !important; }
@@ -387,11 +404,74 @@ section[data-testid="stApp"] .main .block-container {
   background: #ffffff;
   color: #475569;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  animation: finops-fade-up 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+}
+.finops-hero-badge:nth-child(1) { animation-delay: 0.16s; }
+.finops-hero-badge:nth-child(2) { animation-delay: 0.22s; }
+.finops-hero-badge:nth-child(3) { animation-delay: 0.28s; }
+.finops-hero-badge:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
 }
 .finops-hero-badge--accent {
   border-color: color-mix(in srgb, var(--st-primary-color, #0068c9) 35%, #cbd5e1);
   color: #0f172a;
   background: color-mix(in srgb, var(--st-primary-color, #0068c9) 8%, #ffffff);
+  animation: finops-fade-up 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.22s both, finops-float-soft 4s ease-in-out infinite 0.8s;
+}
+.finops-storyline {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 0 auto 1.1rem;
+  max-width: var(--finops-content-max);
+}
+.finops-storyline-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #0f172a;
+  background: #ffffff;
+  border: 1px solid #dbe3ee;
+  border-radius: 999px;
+  padding: 0.45rem 0.75rem;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
+  animation: finops-story-slide 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.finops-storyline-pill:nth-child(1) { animation-delay: 0.06s; }
+.finops-storyline-pill:nth-child(2) { animation-delay: 0.12s; }
+.finops-storyline-pill:nth-child(3) { animation-delay: 0.18s; }
+.finops-storyline-pill:nth-child(4) { animation-delay: 0.24s; }
+.finops-storyline-pill--accent {
+  border-color: color-mix(in srgb, var(--st-primary-color, #0068c9) 35%, #dbe3ee);
+  background: color-mix(in srgb, var(--st-primary-color, #0068c9) 9%, #ffffff);
+  animation: finops-story-slide 0.45s cubic-bezier(0.22, 1, 0.36, 1) both, finops-float-soft 4s ease-in-out infinite 1s;
+}
+.finops-storyline-num {
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--st-primary-color, #0068c9) 16%, #ffffff);
+  color: color-mix(in srgb, var(--st-primary-color, #0068c9) 70%, #0f172a);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.finops-storyline-text { white-space: nowrap; }
+.finops-story-subcopy {
+  max-width: var(--finops-content-max);
+  margin: 0 auto 1rem;
+  text-align: center;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: #64748b;
 }
 .finops-tagline {
   font-size: 1.01rem;
@@ -617,12 +697,20 @@ div[data-testid="stVerticalBlock"]:has(#finops-fix-sheet-anchor) .finops-sec {
 #finops-home-toolbar-anchor { display: none; }
 div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid="stHorizontalBlock"] {
   align-items: flex-start !important;
+  max-width: var(--finops-content-max);
+  margin-left: auto;
+  margin-right: auto;
 }
 div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid="column"] {
   min-width: 0;
 }
 div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid="column"] [role="radiogroup"] {
   flex-wrap: nowrap !important;
+}
+div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid="stFileUploader"] {
+  max-width: var(--finops-content-max);
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .finops-page-footer {
@@ -642,9 +730,9 @@ div[data-testid="stVerticalBlock"]:has(#finops-home-toolbar-anchor) [data-testid
 .finops-page-footer-team { font-weight: 500; color: color-mix(in srgb, var(--st-text-color) 85%, var(--st-background-color)); }
 
 .finops-pipeline {
-  margin: 0 auto 1.75rem;
+  margin: 0 auto 1.4rem;
   padding: 1rem 1.25rem 1.1rem;
-  max-width: 52rem;
+  max-width: var(--finops-content-max);
   border-radius: 16px;
   border: 1px solid #e2e8f0;
   background: #ffffff;
@@ -757,14 +845,25 @@ section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
   display: flex;
   align-items: flex-start;
   gap: 1rem;
-  margin: 2.65rem 0 1.15rem;
-  padding-bottom: 0.45rem;
-  border-bottom: 1px solid color-mix(in srgb, var(--st-border-color, #88888835) 100%, transparent);
+  margin: 1.15rem auto 0.9rem;
+  max-width: var(--finops-content-max);
+  padding: 0.95rem 1.1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 6px 22px rgba(15, 23, 42, 0.06);
   animation: finops-fade-up 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+}
+.finops-flow-step:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--st-primary-color, #0068c9) 30%, #e2e8f0);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.1);
 }
 .finops-flow-step--optional {
-  border-bottom-style: dashed;
+  border-style: dashed;
   opacity: 0.97;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
 }
 .finops-flow-badge-opt {
   flex-shrink: 0;
@@ -805,15 +904,15 @@ section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
 }
 .finops-flow-title {
   font-family: 'Playfair Display', Georgia, serif;
-  font-size: 1.46rem;
+  font-size: 1.34rem;
   font-weight: 700;
   letter-spacing: -0.03em;
   margin: 0;
   color: var(--finops-text);
 }
 .finops-flow-sub {
-  font-size: 0.9375rem;
-  margin: 0.4rem 0 0;
+  font-size: 0.91rem;
+  margin: 0.3rem 0 0;
   line-height: 1.5;
   color: #64748b;
 }
@@ -874,6 +973,8 @@ section[data-testid="stApp"] div[data-testid="stVerticalBlockBorderWrapper"] {
 }
 @media (prefers-reduced-motion: reduce) {
   .finops-metric:hover { transform: translateY(-1px); }
+  .finops-flow-step:hover,
+  .finops-hero-badge:hover { transform: none; }
 }
 .finops-metric-label {
   font-size: 0.64rem;
@@ -1401,19 +1502,31 @@ _pill_class = 'finops-pill finops-pill--stale' if stale else 'finops-pill finops
 st.markdown(f'''<div class="finops-hero"><div class="finops-hero-inner">
 <p class="finops-eyebrow">Airbus internal · FinOps decision support</p>
 <h1 class="finops-headline">FinOps Optimizer<br><em>Map once. Save millions.</em></h1>
-<p class="finops-subheadline">List-price intelligence for EC2 &amp; RDS — map once, enrich, export with full audit context.</p>
+<p class="finops-subheadline">From raw infra sheets to clear optimization decisions for EC2 &amp; RDS, with row-aware context and audit-safe output.</p>
 <div class="finops-hero-badges">
 <span class="finops-hero-badge">Fully local · no external APIs</span>
 <span class="finops-hero-badge finops-hero-badge--accent">EC2 &amp; RDS</span>
 <span class="finops-hero-badge">Internal use</span>
 </div>
-<p class="finops-tagline">Upload or merge files, confirm columns, run enrichment, then download Excel or CSV. Pricing is row-aware: each row uses its own region when present; step-1 region is fallback only.</p>
+<p class="finops-tagline">Upload, map once, enrich with local pricing, then export a decision-ready table. Each row uses its own region when present; step-1 region is fallback only.</p>
 <span class="{_pill_class}">{html.escape(pill)}</span>
 </div></div>''', unsafe_allow_html=True)
+st.markdown(
+    '''
+<div class="finops-storyline">
+  <span class="finops-storyline-pill"><span class="finops-storyline-num">1</span><span class="finops-storyline-text">Prepare data</span></span>
+  <span class="finops-storyline-pill"><span class="finops-storyline-num">2</span><span class="finops-storyline-text">Map columns</span></span>
+  <span class="finops-storyline-pill finops-storyline-pill--accent"><span class="finops-storyline-num">3</span><span class="finops-storyline-text">Generate recommendations</span></span>
+  <span class="finops-storyline-pill"><span class="finops-storyline-num">4</span><span class="finops-storyline-text">Review and export</span></span>
+</div>
+<p class="finops-story-subcopy">One clear flow: prepare input, enrich safely, inspect outcomes, and export without losing any original data.</p>
+''',
+    unsafe_allow_html=True,
+)
 finops_pipeline_slot = st.empty()
 _flow_optional(
-    'Merge two spreadsheets first',
-    'Skip this if you already have one file. Merge on a shared ID, then use <strong>Use merged data</strong> or upload the result in step 1.',
+    'Optional pre-step: merge two spreadsheets',
+    'Use this only when data is split across two files. Dataset 1 stays primary; Dataset 2 only fills missing context.',
 )
 with st.container(border=True):
     st.markdown('<div id="finops-fix-sheet-anchor"></div>', unsafe_allow_html=True)
@@ -1474,7 +1587,7 @@ if _fix_mdf is not None:
         st.rerun()
 st.markdown('<div class="finops-divider finops-divider--section" role="separator" aria-hidden="true"></div>', unsafe_allow_html=True)
 with st.container(border=True):
-    _flow_step(1, 'Upload and run settings', 'Add your file, choose default region / service / CPU, then Continue. Default region is used only when a row has no valid region value.')
+    _flow_step(1, 'Upload and define run context', 'Add your file, set service and CPU scope, then Continue. Default region is used only when a row has no valid region.')
     st.markdown('<div class="finops-sec">Spreadsheet</div>', unsafe_allow_html=True)
     uploaded = st.file_uploader('Drop your spreadsheet', type=['csv', 'xlsx', 'xls'], label_visibility='visible')
     st.caption('Needs a column with AWS API-style names (e.g. m5.large, db.r5.xlarge).')
@@ -1533,43 +1646,40 @@ with st.container(border=True):
     with st.expander('Quick guide (same order as this page)', expanded=False):
         st.markdown(
             """
-**Step 1 — Upload and run settings**  
-Pick **Default region (row fallback)**, **Service** (**Both** is default for mixed data), and **CPU**.  
-If your file has a `region` column, each row uses that row’s region first. Upload CSV/Excel, then **Continue**.
+**Story flow in 4 steps**
 
-**Optional — Merge two files first** (at the top of the page, before step 1)  
-Skip if you already have one table. Merge on a shared ID, then **Use merged data** or upload the merged file in step 1.
+1. **Upload + context**  
+   Upload CSV/Excel, set service/CPU, and keep default region as fallback.
 
-**Step 2 — Map columns** (only if the tool asks)  
-Choose **instance / DB class**, **OS or engine**, and **actual cost** when prompted. Cost drives meaningful savings %.
+2. **Map once**  
+   Confirm instance/DB class, OS or engine, and actual cost only when prompted.
 
-**Step 3 — Run enrichment**  
-Uses row region + instance/class + OS/engine context. Default region is only fallback.  
-If you change service/CPU/default region after enriching, click **Run enrichment** again.
+3. **Enrich with row-aware pricing**  
+   Current and alternative values are calculated using row region + row context.
 
-**Step 4 — Results and download**  
-Filter the table, then **Excel** (disclaimers + metadata) or **CSV** (table only).
+4. **Review + export**  
+   Filter/search the output and download Excel (with metadata) or CSV.
 
-_More detail and caveats: **How it works · Limitations** below._
+_Need caveats and assumptions? Open **How it works · Limitations** below._
 """
         )
     with st.expander('How it works · Limitations', expanded=False):
         st.markdown(
             """
-**Same story as the page**  
-The workflow bar under the title tracks **Upload → Map → Analyze → Export**. The **Optional** merge block comes **first** on the page; skip it if you do not need two files combined.
+**What this tool does well**  
+Creates recommendation-ready FinOps output for EC2/RDS using local on-demand pricing, while preserving all original rows, columns, and values.
 
-**What this tool does**  
-Adds **Alt instances**, **indicative costs**, and **savings %** using **static on-demand list prices** from a **local dataset** (no live AWS Pricing API). Keeps your columns in order; appends enrichment after the instance column.
+**How decisions are made**  
+Pricing and alternatives are row-context aware (instance/class, OS/engine, region). The default region applies only when row region is missing or invalid.
 
-**What it does not do**  
-Does not replace **Billing**, **Cost Explorer**, or **CUR**; does not apply **RI**, **SP**, or **enterprise discounts**. Does not prove **performance** or **Graviton** fit—validate in engineering before production.
+**What remains your decision**  
+Final production moves still require engineering validation (performance fit, architecture fit, and business constraints).
 
-**Limitations**  
-Indicative values only—invoices win. Many **RDS** SKUs may be missing → **N/A**. If there is no second distinct recommendation, **Alt2** shows **N/A (No distinct alternative)**. Snapshot **as-of** appears in the card above and in Excel **Metadata**.
+**Known boundaries**  
+If local SKU coverage is missing, the output shows safe **N/A** instead of guessing. Some RDS combinations can remain unresolved depending on engine/AZ support.
 
-**Optional merge**  
-Dataset 1 is primary (column order kept). Dataset 2 adds columns; values fill where primary cells are empty. This block is at the **top** of the page, before step 1.
+**About optional merge**  
+Dataset 1 always remains primary. Dataset 2 only contributes extra fields and only fills missing primary values when a strict key match exists.
 """
         )
 st.markdown('<div class="finops-divider" role="separator" aria-hidden="true"></div>', unsafe_allow_html=True)
@@ -1606,7 +1716,7 @@ if lr is not None and (not binding_ready):
     cols_all = list(lr.df.columns)
     if lr.needs_instance_pick or lr.needs_os_pick:
         with st.container(border=True):
-            _flow_step(2, 'Map columns', 'Point to the instance / DB class column, OS or engine, and actual cost when asked.')
+            _flow_step(2, 'Map columns once', 'Confirm instance / DB class, OS or engine, and actual cost only when requested.')
             (mc1, mc2) = st.columns(2)
             with mc1:
                 di = 0
@@ -1654,7 +1764,7 @@ if lr is not None and st.session_state.get('binding') is not None:
     )
     if st.session_state.get('result') is None:
         with st.container(border=True):
-            _flow_step(3, 'Run enrichment', 'Applies list prices for your region and fills Alt instances, indicative costs, and savings.')
+            _flow_step(3, 'Run enrichment', 'Calculates current price, alternatives, and savings using row context with safe fallbacks.')
             if st.button('Run enrichment', type='primary', key='run_enrich'):
                 try:
                     svc = st.session_state['service']
@@ -1674,7 +1784,7 @@ if df_out is not None:
     with st.container(border=True):
         if st.session_state.get('_enrich_svc') != st.session_state.get('service') or st.session_state.get('_enrich_cpu') != st.session_state.get('cpu_filter'):
             st.warning('Service or CPU mode changed since last enrichment — click **Run enrichment** to refresh.')
-        st.markdown('<div class="finops-flow-step" style="margin-top:0.5rem;border-bottom:none;"><span class="finops-flow-num" style="background:var(--st-green-color,#34c759);">4</span><div><p class="finops-flow-title">Results</p><p class="finops-flow-sub">Filter and search the table, then download Excel or CSV.</p></div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="finops-flow-step" style="margin-top:0.5rem;"><span class="finops-flow-num" style="background:var(--st-green-color,#34c759);">4</span><div><p class="finops-flow-title">Review results and export</p><p class="finops-flow-sub">Filter the output, validate key rows, and download Excel or CSV.</p></div></div>', unsafe_allow_html=True)
         (f1, f2, f3, f4) = st.columns([1, 1, 1, 3])
         with f1:
             vf_svc = st.radio('View service', ['all', 'ec2', 'rds'], format_func=lambda x: {'all': 'Both (show all)', 'ec2': 'EC2 rows only', 'rds': 'RDS rows only'}[x], horizontal=True, key='vf_svc')
