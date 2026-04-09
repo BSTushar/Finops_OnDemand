@@ -19,7 +19,7 @@ class TestAlt2DistinctMessage(unittest.TestCase):
         df = pd.DataFrame({'Instance': ['m5.large'], 'OS': ['linux'], 'Spend': [50.0]})
         b = ColumnBinding(instance='Instance', os='OS', actual_cost='Spend')
         out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
-        self.assertEqual(out['Alt1 Instance'].iloc[0], 'm6i.large')
+        self.assertEqual(out['Alt1 Instance'].iloc[0], 'm6a.large')
         self.assertEqual(out['Alt2 Instance'].iloc[0], 'm7g.large')
         self.assertNotEqual(out['Alt2 Instance'].iloc[0], ALT2_NO_DISTINCT)
 

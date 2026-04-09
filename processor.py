@@ -129,6 +129,106 @@ def _hourly_alt(alt: str | None, os_engine: str, backend: Literal['ec2', 'rds'],
     return _hourly_cur(normalize_instance_string(alt), os_engine, backend, region=region)
 
 
+_INTEL_FAMILY_TO_AMD_RE = re.compile(r'^([a-z]+)(\d+)i$')
+
+
+def _amd_variant_instance_api(api_name: str | None) -> str | None:
+    """
+    Return an AMD sibling for Intel families when possible (e.g. m6i.large -> m6a.large).
+    Keeps db. prefix for RDS classes.
+    """
+    if not api_name or not isinstance(api_name, str):
+        return None
+    norm = normalize_instance_string(api_name)
+    if not norm:
+        return None
+    is_db = norm.startswith('db.')
+    body = norm[3:] if is_db else norm
+    if '.' not in body:
+        return None
+    (family, size) = body.split('.', 1)
+    m = _INTEL_FAMILY_TO_AMD_RE.fullmatch(family)
+    if m is None:
+        return None
+    amd_family = f'{m.group(1)}{m.group(2)}a'
+    return f'{"db." if is_db else ""}{amd_family}.{size}'
+
+
+def _pick_cheapest_alt_candidate(
+    candidates: list[str],
+    *,
+    os_engine: str,
+    backend: Literal['ec2', 'rds'],
+    region: str,
+    price_cache: dict[tuple[str, str, str, str], float | None],
+) -> tuple[str | None, float | None]:
+    best_alt: str | None = None
+    best_price: float | None = None
+    seen: set[str] = set()
+    for cand in candidates:
+        c = normalize_instance_string(cand)
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        p_key = (c, os_engine, backend, region)
+        if p_key not in price_cache:
+            price_cache[p_key] = _hourly_alt(c, os_engine, backend, region=region)
+        p = price_cache[p_key]
+        if p is None:
+            continue
+        if best_price is None or p < best_price or (p == best_price and c < str(best_alt)):
+            best_alt = c
+            best_price = p
+    return (best_alt, best_price)
+
+
+def _rds_row_engine_and_az(
+    work: pd.DataFrame,
+    row_i: int,
+    cols: list,
+    *,
+    ins_idx: int,
+    cc_idx: int | None,
+    os_idx: int | None,
+) -> tuple[str, str]:
+    """
+    Best-effort extraction of DB engine + AZ context from row columns.
+    Returns normalized lowercase values ('' when not found).
+    """
+
+    def _find_col_value(matchers: tuple[str, ...]) -> str:
+        for j, c in enumerate(cols):
+            if j == ins_idx or (cc_idx is not None and j == cc_idx):
+                continue
+            name = _norm_header(c)
+            if not any(m in name for m in matchers):
+                continue
+            v = work.iat[row_i, j]
+            if _nonempty_cell(v):
+                return normalize_instance_string(v).strip().lower()
+        return ''
+
+    engine = _find_col_value(('db engine', 'engine', 'database engine', 'db_engine'))
+    az = _find_col_value(('availability zone', 'availability_zone', 'az type', 'az', 'multi-az', 'multi az'))
+    return (engine, az)
+
+
+def _is_rds_context_supported(*, engine: str, az: str) -> bool:
+    """
+    Current bundled RDS recommendation scope:
+    - engine: MySQL-like only
+    - deployment: single-AZ only
+    """
+    eng = normalize_instance_string(engine).strip().lower()
+    azv = normalize_instance_string(az).strip().lower()
+
+    if eng and not any(token in eng for token in ('mysql', 'mariadb')):
+        return False
+    if azv and ('multi-az' in azv or 'multi az' in azv or azv == 'multi'):
+        return False
+    return True
+
+
 _SUPPORTED_REGION_IDS: frozenset[str] = frozenset((rid for rid, _label in SUPPORTED_REGIONS))
 _ROW_REGION_ALIASES: dict[str, str] = {
     # Local bundled tables do not have direct entries for these in this build.
@@ -473,6 +573,20 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
                 a1s[i] = a2s[i] = NA
                 continue
             backend = _pricing_backend(inst)
+            if backend == 'rds':
+                (db_engine, az_val) = _rds_row_engine_and_az(
+                    work,
+                    i,
+                    cols,
+                    ins_idx=ins_idx,
+                    cc_idx=cc_idx,
+                    os_idx=os_idx,
+                )
+                if not _is_rds_context_supported(engine=db_engine, az=az_val):
+                    cur_p[i] = a1p[i] = a2p[i] = None
+                    a1i[i] = a2i[i] = NA
+                    a1s[i] = a2s[i] = NA
+                    continue
             rec_key = (inst, backend, cpu)
             if rec_key not in rec_cache:
                 rec = get_rds_recommendations(inst, cpu_filter=cpu) if backend == 'rds' else get_recommendations(inst, cpu_filter=cpu)
@@ -493,27 +607,61 @@ def process(df: pd.DataFrame, binding: ColumnBinding, region: str=DEFAULT_REGION
             if cur_key not in price_cache:
                 price_cache[cur_key] = _hourly_cur(inst, os_engine, backend, region=row_region)
             p_cur = price_cache[cur_key]
+            include_amd_variant = cpu in ('both', 'default')
+            alt1_candidates: list[str] = []
+            alt2_candidates: list[str] = []
             if alt1 is not None:
-                a1_key = (normalize_instance_string(alt1), os_engine, backend, row_region)
-                if a1_key not in price_cache:
-                    price_cache[a1_key] = _hourly_alt(alt1, os_engine, backend, region=row_region)
-                p_a1 = price_cache[a1_key]
-            else:
-                p_a1 = None
+                alt1_candidates.append(alt1)
+                if include_amd_variant:
+                    amd_alt1 = _amd_variant_instance_api(alt1)
+                    if amd_alt1:
+                        alt1_candidates.append(amd_alt1)
             if alt2 is not None:
-                a2_key = (normalize_instance_string(alt2), os_engine, backend, row_region)
-                if a2_key not in price_cache:
-                    price_cache[a2_key] = _hourly_alt(alt2, os_engine, backend, region=row_region)
-                p_a2 = price_cache[a2_key]
+                alt2_candidates.append(alt2)
+                if include_amd_variant:
+                    amd_alt2 = _amd_variant_instance_api(alt2)
+                    if amd_alt2:
+                        alt2_candidates.append(amd_alt2)
+            if p_cur is None:
+                # If current SKU price is unavailable, suppress alternatives for consistency.
+                (best_alt1, p_a1) = (None, None)
+                (best_alt2, p_a2) = (None, None)
             else:
-                p_a2 = None
+                (best_alt1, p_a1) = _pick_cheapest_alt_candidate(
+                    alt1_candidates,
+                    os_engine=os_engine,
+                    backend=backend,
+                    region=row_region,
+                    price_cache=price_cache,
+                )
+                alt2_candidates = [
+                    c
+                    for c in alt2_candidates
+                    if normalize_instance_string(c) != normalize_instance_string(best_alt1 or '')
+                ]
+                (best_alt2, p_a2) = _pick_cheapest_alt_candidate(
+                    alt2_candidates,
+                    os_engine=os_engine,
+                    backend=backend,
+                    region=row_region,
+                    price_cache=price_cache,
+                )
+                # Keep Alt2 meaningful: if it is not cheaper than Alt1, suppress it.
+                if (
+                    p_a1 is not None
+                    and p_a2 is not None
+                    and math.isfinite(float(p_a1))
+                    and math.isfinite(float(p_a2))
+                    and float(p_a2) >= float(p_a1)
+                ):
+                    (best_alt2, p_a2) = (None, None)
             cur_p[i] = p_cur
-            a1i[i] = alt1 if alt1 is not None else NA
-            if alt2 is not None:
-                a2i[i] = alt2
+            a1i[i] = best_alt1 if best_alt1 is not None else NA
+            if best_alt2 is not None:
+                a2i[i] = best_alt2
             elif win_blocked_graviton_alt2:
                 a2i[i] = ALT2_INCOMPATIBLE_OS
-            elif alt1 is not None:
+            elif alt1 is not None and alt2 is None:
                 a2i[i] = ALT2_NO_DISTINCT
             else:
                 a2i[i] = NA

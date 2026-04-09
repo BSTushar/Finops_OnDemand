@@ -30,6 +30,14 @@ class TestEc2AltPriceConsistency(unittest.TestCase):
             want = get_price(str(alt1), region='eu-west-1', os='linux')
             self.assertIsNotNone(want)
 
+    def test_ec2_missing_current_price_suppresses_alt_names(self) -> None:
+        df = pd.DataFrame({'i': ['m5.fakeclass'], 'p': ['linux'], 'c': [1.0]})
+        b = ColumnBinding(instance='i', os='p', actual_cost='c')
+        out = apply_na_fill(process(df, b, region='eu-west-1', service='both'))
+        self.assertEqual(out['Current Price ($/hr)'].iloc[0], 'N/A')
+        self.assertEqual(out['Alt1 Instance'].iloc[0], 'N/A')
+        self.assertEqual(out['Alt2 Instance'].iloc[0], 'N/A')
+
 
 if __name__ == '__main__':
     unittest.main()

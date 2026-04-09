@@ -47,8 +47,8 @@ class TestCostFormula(unittest.TestCase):
         out = apply_na_fill(process(df, b, region='eu-west-1', service='both', cpu_filter='both'))
         p_cur = get_price('m5.large', region='eu-west-1', os='linux')
         alt1 = out['Alt1 Instance'].iloc[0]
-        self.assertEqual(alt1, 'm6i.large')
-        p_alt = get_price('m6i.large', region='eu-west-1', os='linux')
+        self.assertIn(alt1, ('m6i.large', 'm6a.large'))
+        p_alt = get_price(str(alt1), region='eu-west-1', os='linux')
         self.assertIsNotNone(p_cur)
         self.assertIsNotNone(p_alt)
         self.assertAlmostEqual(float(out['Current Price ($/hr)'].iloc[0]), float(p_cur), places=6)
