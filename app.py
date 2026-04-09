@@ -20,6 +20,7 @@ from pricing_engine import CACHE_METADATA, DECISION_SUPPORT_NOTE, DEFAULT_REGION
 from sheet_merger import merge_primary_with_secondary, suggest_key_pairs
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger(__name__)
+MAX_UI_TABLE_ROWS = 2000
 
 
 def _ui_stretch_kwargs(widget=st.dataframe) -> dict:
@@ -1086,6 +1087,13 @@ def _row_graviton_alt(a1: object, a2: object) -> bool:
     return False
 
 
+def _is_graviton_alt_cell(x: object) -> bool:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return False
+    s = str(x).strip().lower()
+    return bool(_GRAV_ALT_RE.search(s))
+
+
 def _dashboard_strip_metrics(df: pd.DataFrame, inst_col: str | None) -> dict[str, float | int | None]:
     total_cost: float | None = None
     if 'Actual Cost ($)' in df.columns:
@@ -1107,15 +1115,13 @@ def _dashboard_strip_metrics(df: pd.DataFrame, inst_col: str | None) -> dict[str
     old_gen = 0
     grav = 0
     if inst_col and inst_col in df.columns:
+        inst_ser = df[inst_col]
+        old_gen = int(inst_ser.map(_is_old_gen_instance_cell).sum())
         a1c = 'Alt1 Instance' if 'Alt1 Instance' in df.columns else None
         a2c = 'Alt2 Instance' if 'Alt2 Instance' in df.columns else None
-        for _i, row in df.iterrows():
-            if _is_old_gen_instance_cell(row.get(inst_col)):
-                old_gen += 1
-            a1 = row.get(a1c) if a1c else None
-            a2 = row.get(a2c) if a2c else None
-            if _row_graviton_alt(a1, a2):
-                grav += 1
+        a1_ser = df[a1c] if a1c else pd.Series(index=df.index, dtype=object)
+        a2_ser = df[a2c] if a2c else pd.Series(index=df.index, dtype=object)
+        grav = int((a1_ser.map(_is_graviton_alt_cell) | a2_ser.map(_is_graviton_alt_cell)).sum())
     return {'total_cost': total_cost, 'avg_save': avg_save, 'old_gen': old_gen, 'grav': grav}
 
 
