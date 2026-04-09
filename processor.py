@@ -294,7 +294,15 @@ def _cost_header_kind(name: object) -> str:
         return 'month'
     if 'on demand' in n or 'ondemand' in n:
         return 'on_demand'
-    if re.search(r'\bri\b', n) or 'reserved instance' in n or 'reservation' in n:
+    # Treat Savings Plan cost as RI-like committed spend for row-wise fallback.
+    if (
+        re.search(r'\bri\b', n)
+        or 'reserved instance' in n
+        or 'reservation' in n
+        or 'savings plan' in n
+        or 'savings_plan' in str(name).strip().lower()
+        or 'sp cost' in n
+    ):
         return 'ri'
     if 'total cost' in n or n.startswith('total '):
         return 'total'
